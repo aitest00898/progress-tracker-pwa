@@ -76,7 +76,10 @@ function icon(glyph, label) { return node('span', { class: 'icon', ariaLabel: la
 function button(label, onClick, options = {}) {
   return node('button', { type: 'button', class: options.className ?? 'button', ariaLabel: options.ariaLabel ?? label, title: options.title, disabled: options.disabled, onClick }, options.icon ? icon(options.icon, options.ariaLabel ?? label) : null, options.text === false ? null : label);
 }
-function iconButton(glyph, label, onClick, options = {}) { return button(label, onClick, { ...options, className: options.className ?? 'icon-button', icon: glyph, text: false }); }
+function iconButton(glyph, label, onClick, options = {}) {
+  const className = ['icon-button', options.className].filter(Boolean).join(' ');
+  return button(label, onClick, { ...options, className, icon: glyph, text: false });
+}
 function heading(text, level = 2, className = '') { return node(`h${level}`, { class: className }, text); }
 function setText(element, text) { element.textContent = text; return element; }
 function stop(event) { event.preventDefault(); event.stopPropagation(); }

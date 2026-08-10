@@ -55,10 +55,17 @@ test('Service Worker caches hashed build assets before atomically replacing the 
 test('document shell and responsive CSS preserve safe areas and reduced motion', async () => {
   const html = await readFile('index.html', 'utf8');
   const css = await readFile('src/styles.css', 'utf8');
+  const app = await readFile('src/app.js', 'utf8');
   assert.match(html, /<html lang="zh-Hant-TW">/);
   assert.match(html, /manifest\.en\.webmanifest/);
+  assert.match(html, /initial-scale=1\.0, minimum-scale=1\.0, maximum-scale=1\.0, user-scalable=no/);
   assert.match(html, /apple-mobile-web-app-capable/);
   assert.match(html, /apple-mobile-web-app-title/);
+  assert.match(css, /-webkit-text-size-adjust: 100%/);
+  assert.match(css, /#app \{ width: 100%; min-width: 0; max-width: 100%/);
+  assert.match(css, /input, textarea, select \{ font-size: 16px; \}/);
+  assert.match(css, /\.detail-chevron \{ width: 100%; min-width: 0/);
+  assert.match(app, /const className = \['icon-button', options\.className\]/);
   assert.match(css, /env\(safe-area-inset-top/);
   assert.match(css, /env\(safe-area-inset-bottom/);
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
