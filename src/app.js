@@ -278,21 +278,20 @@ function handleKeyboardShortcuts(event) {
   else if (event.key.toLowerCase() === 'n' && ui.page === 'categories') { event.preventDefault(); document.querySelector('.quick-create-input')?.focus(); }
 }
 function swipeHandler(element, item) {
-  let startX = 0; let startY = 0; let startAt = 0; let active = false;
+  let startX = 0; let startY = 0; let active = false;
   let horizontal = false;
   let suppressClick = false;
-  const clearVisual = (animate = true) => {
-    element.classList.remove('is-swiping', 'swipe-left', 'swipe-right', 'swipe-reset');
-    element.style.removeProperty('--swipe-x');
-    if (!animate) return;
+  const clearVisual = () => {
+    element.classList.remove('is-swiping', 'swipe-left', 'swipe-right');
     element.classList.add('swipe-reset');
-    setTimeout(() => element.classList.remove('swipe-reset'), SWIPE_CONFIG.releaseDuration);
+    element.style.removeProperty('--swipe-x');
+    requestAnimationFrame(() => element.classList.remove('swipe-reset'));
   };
   const updateVisual = (dx) => {
     const direction = swipeDirection(dx);
     element.classList.toggle('swipe-left', direction === 'left');
     element.classList.toggle('swipe-right', direction === 'right');
-    element.style.setProperty('--swipe-x', `${swipeOffset(dx, element.clientWidth)}px`);
+    element.style.setProperty('--swipe-x', `${swipeOffset(dx)}px`);
     element.classList.add('is-swiping');
   };
   element.addEventListener('click', (event) => {
@@ -304,8 +303,8 @@ function swipeHandler(element, item) {
   element.addEventListener('pointerdown', (event) => {
     if (event.pointerType === 'mouse' || event.clientX < SWIPE_CONFIG.edgeGuard || event.clientX > window.innerWidth - SWIPE_CONFIG.edgeGuard) return;
     if (event.target.closest('button, input, select, textarea')) return;
-    startX = event.clientX; startY = event.clientY; startAt = performance.now(); active = true; horizontal = false;
-    clearVisual(false);
+    startX = event.clientX; startY = event.clientY; active = true; horizontal = false;
+    clearVisual();
   });
   element.addEventListener('pointermove', (event) => {
     if (!active) return;
@@ -327,13 +326,10 @@ function swipeHandler(element, item) {
     if (!horizontal) { clearVisual(); return; }
     const dx = event.clientX - startX;
     const dy = event.clientY - startY;
-    const elapsed = Math.max(1, performance.now() - startAt);
     suppressClick = true;
-    if (!shouldTriggerSwipe(dx, dy, elapsed)) { clearVisual(); return; }
+    if (!shouldTriggerSwipe(dx, dy)) { clearVisual(); return; }
     if (itemHasConflict(currentState(), item.id)) { clearVisual(); blockConflictedEdit(); return; }
-    element.classList.remove('is-swiping');
-    element.classList.add(dx < 0 ? 'swipe-left' : 'swipe-right');
-    setTimeout(() => clearVisual(false), SWIPE_CONFIG.releaseDuration);
+    clearVisual();
     if (dx < 0) performStatus(item, item.status === 'completed' ? 'active' : 'completed');
     else performDelete(item);
   });
