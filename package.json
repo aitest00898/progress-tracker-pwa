@@ -1,0 +1,23 @@
+{
+  "name": "progress-tracker-pwa",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Local-first, offline-first Progress Tracker PWA",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --test test/*.test.mjs",
+    "benchmark": "node scripts/benchmark.mjs",
+    "lint": "node scripts/lint.mjs",
+    "typecheck": "node scripts/typecheck.mjs",
+    "verify": "npm run lint && npm run typecheck && npm test && npm run build"
+  },
+  "devDependencies": {
+    "vite": "^7.1.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
