@@ -210,6 +210,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .item-row.item-highlight { animation: highlight-pulse 1.5s var(--motion-standard); }
 .item-row.swipe-left { transform: translateX(-9%); background: var(--success-soft); }
 .item-row.swipe-right { transform: translateX(9%); background: var(--danger-soft); }
+.item-row.is-swiping { transition: none !important; transform: translate3d(var(--swipe-x), 0, 0) !important; }
+.item-row.swipe-left.is-swiping { background: var(--success-soft); }
+.item-row.swipe-right.is-swiping { background: var(--danger-soft); }
+.item-row.swipe-reset { transition: transform var(--duration-fast) var(--motion-spring), background var(--duration-fast) var(--motion-standard); }
 .item-row-main { display: grid; grid-template-columns: 24px 32px 44px minmax(0, 1fr) 28px; align-items: center; gap: var(--space-2); min-width: 0; max-width: 100%; min-height: 78px; padding: 10px var(--space-3); padding-left: calc(var(--space-3) + var(--depth) * var(--space-5)); }
 .item-row-main.leaf { grid-template-columns: 24px 32px minmax(0, 1fr) 28px; }
 .drag-handle { width: 24px; border: 0; padding: 0; color: var(--text-faint); background: transparent; font-size: 20px; cursor: grab; touch-action: none; }
@@ -717,6 +721,8 @@ body::before {
 .item-row:hover { transform: translateY(-1px); }
 .item-row.is-completed { opacity: .55; filter: saturate(.72); }
 .item-row.is-completed .status-button { animation: completion-pop var(--duration-emphasis) var(--motion-spring); }
+.item-row:not(.tree-row).swipe-left:not(.is-swiping) { transform: translateX(-9%); background: var(--success-soft); }
+.item-row:not(.tree-row).swipe-right:not(.is-swiping) { transform: translateX(9%); background: var(--danger-soft); }
 
 .progress-ring {
   background: conic-gradient(var(--primary) var(--progress), rgb(118 118 128 / .14) 0);
@@ -795,6 +801,10 @@ body::before {
 }
 .tree-row.swipe-left .item-row-main { transform: translateX(-9%); background: var(--success-soft); }
 .tree-row.swipe-right .item-row-main { transform: translateX(9%); background: var(--danger-soft); }
+.tree-row.is-swiping .item-row-main { transition: none !important; transform: translate3d(var(--swipe-x), 0, 0) !important; }
+.tree-row.swipe-left.is-swiping .item-row-main { background: var(--success-soft); }
+.tree-row.swipe-right.is-swiping .item-row-main { background: var(--danger-soft); }
+.tree-row.swipe-reset .item-row-main { transition: transform var(--duration-fast) var(--motion-spring), background var(--duration-fast) var(--motion-standard); }
 
 .setting-card {
   border-color: var(--border-subtle);

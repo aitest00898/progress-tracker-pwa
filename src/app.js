@@ -13,6 +13,7 @@ import {
 import { renderMarkdown } from './markdown.js';
 import { VirtualList } from './virtual-list.js';
 import { treeRowClassNames, treeRowMetrics, treeRowSemantics } from './tree-view.js';
+import { SWIPE_CONFIG, classifySwipeAxis, shouldTriggerSwipe, swipeDirection, swipeOffset } from './swipe.js';
 import { downloadText } from './storage.js';
 import { browserStorageEstimate, storageBreakdown } from './storage-metrics.js';
 import { exportPTMD, parsePTMD, previewImport, applyImportPreview, restorePreview } from './ptmd.js';
@@ -278,22 +279,65 @@ function handleKeyboardShortcuts(event) {
 }
 function swipeHandler(element, item) {
   let startX = 0; let startY = 0; let startAt = 0; let active = false;
+  let horizontal = false;
+  let suppressClick = false;
+  const clearVisual = (animate = true) => {
+    element.classList.remove('is-swiping', 'swipe-left', 'swipe-right', 'swipe-reset');
+    element.style.removeProperty('--swipe-x');
+    if (!animate) return;
+    element.classList.add('swipe-reset');
+    setTimeout(() => element.classList.remove('swipe-reset'), SWIPE_CONFIG.releaseDuration);
+  };
+  const updateVisual = (dx) => {
+    const direction = swipeDirection(dx);
+    element.classList.toggle('swipe-left', direction === 'left');
+    element.classList.toggle('swipe-right', direction === 'right');
+    element.style.setProperty('--swipe-x', `${swipeOffset(dx, element.clientWidth)}px`);
+    element.classList.add('is-swiping');
+  };
+  element.addEventListener('click', (event) => {
+    if (!suppressClick) return;
+    suppressClick = false;
+    event.preventDefault();
+    event.stopPropagation();
+  }, true);
   element.addEventListener('pointerdown', (event) => {
-    if (event.pointerType === 'mouse' || event.clientX < 28 || event.clientX > window.innerWidth - 28) return;
-    startX = event.clientX; startY = event.clientY; startAt = performance.now(); active = true;
+    if (event.pointerType === 'mouse' || event.clientX < SWIPE_CONFIG.edgeGuard || event.clientX > window.innerWidth - SWIPE_CONFIG.edgeGuard) return;
+    if (event.target.closest('button, input, select, textarea')) return;
+    startX = event.clientX; startY = event.clientY; startAt = performance.now(); active = true; horizontal = false;
+    clearVisual(false);
+  });
+  element.addEventListener('pointermove', (event) => {
+    if (!active) return;
+    const dx = event.clientX - startX;
+    const dy = event.clientY - startY;
+    if (!horizontal) {
+      const axis = classifySwipeAxis(dx, dy);
+      if (axis === 'vertical') { active = false; return; }
+      if (axis !== 'horizontal') return;
+      horizontal = true;
+      try { element.setPointerCapture?.(event.pointerId); } catch { /* pointer capture is best effort in embedded webviews */ }
+    }
+    event.preventDefault();
+    updateVisual(dx);
   });
   element.addEventListener('pointerup', (event) => {
-    if (!active) return; active = false;
-    const dx = event.clientX - startX; const dy = event.clientY - startY; const elapsed = Math.max(1, performance.now() - startAt);
-    const horizontal = Math.abs(dx) >= 72 && Math.abs(dx) > Math.abs(dy) * 1.3 && Math.abs(dx / elapsed) >= 0.25;
-    if (!horizontal) return;
-    if (itemHasConflict(currentState(), item.id)) { blockConflictedEdit(); return; }
+    if (!active) return;
+    active = false;
+    if (!horizontal) { clearVisual(); return; }
+    const dx = event.clientX - startX;
+    const dy = event.clientY - startY;
+    const elapsed = Math.max(1, performance.now() - startAt);
+    suppressClick = true;
+    if (!shouldTriggerSwipe(dx, dy, elapsed)) { clearVisual(); return; }
+    if (itemHasConflict(currentState(), item.id)) { clearVisual(); blockConflictedEdit(); return; }
+    element.classList.remove('is-swiping');
     element.classList.add(dx < 0 ? 'swipe-left' : 'swipe-right');
-    setTimeout(() => element.classList.remove('swipe-left', 'swipe-right'), 280);
+    setTimeout(() => clearVisual(false), SWIPE_CONFIG.releaseDuration);
     if (dx < 0) performStatus(item, item.status === 'completed' ? 'active' : 'completed');
     else performDelete(item);
   });
-  element.addEventListener('pointercancel', () => { active = false; });
+  element.addEventListener('pointercancel', () => { active = false; horizontal = false; clearVisual(); });
 }
 
 function categoryDepthLimit() { return Math.max(2, Math.floor((window.innerWidth - (window.innerWidth < 720 ? 32 : 360)) / 145)); }
