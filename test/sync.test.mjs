@@ -1,8 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makeEmptyState } from '../src/schema.js';
-import { createItem, reorderSmartView, setDue, setNotes, setPriority, smartViewItems } from '../src/engine.js';
-import { coalescePendingChanges, enqueueLocalChange, mergeDatasets, resolveConflict } from '../src/sync.js';
+import {
+  addReminder, addToToday, createCategory, createItem, renameCategory, reorderSmartView,
+  setDue, setNotes, setPriority, setTags, smartViewItems, updateReminder,
+} from '../src/engine.js';
+import {
+  canPushState, coalescePendingChanges, datasetSwitchGate, enqueueLocalChange,
+  GoogleDriveSync, mergeDatasets, prepareDatasetSwitch, resolveConflict,
+} from '../src/sync.js';
 
 const at = '2026-08-10T09:00:00.000Z';
 function branch() { const s = makeEmptyState(at); const item = createItem(s, { categoryId: s.categories[0].id, title: 'Shared' }, at).item; return { s, item }; }
@@ -49,4 +55,191 @@ test('pending changes coalesce by changed item while preserving semantic labels'
   enqueueLocalChange(state, 'note_edited', [item.id]);
   assert.equal(state.syncChanges.length, 1);
   assert.deepEqual(state.syncChanges[0].labels, ['title_changed', 'note_edited']);
+});
+
+test('three-way merge covers categories, tags, reminders, Today membership and settings', () => {
+  const base = branch().s;
+  const item = base.items[0];
+  const category = createCategory(base, 'Shared category', at).category;
+  const reminder = addReminder(base, item.id, { type: 'absolute', at: '2026-08-12T09:00:00.000Z' }, at).reminder;
+  addToToday(base, item.id, 'manual', at);
+  const local = structuredClone(base);
+  const remote = structuredClone(base);
+  renameCategory(local, category.id, 'Local category', at);
+  setTags(local, item.id, ['Japan', 'Paid'], at);
+  local.today.items[item.id].order = 12;
+  updateReminder(remote, reminder.id, { time: '10:30' }, at);
+  remote.today.items[item.id].source = 'planned';
+  remote.settings.theme = 'dark';
+  const result = mergeDatasets(base, local, remote, { at });
+  assert.equal(result.conflicts.length, 0);
+  assert.equal(result.state.categories.find((entry) => entry.id === category.id).title, 'Local category');
+  assert.deepEqual(result.state.items.find((entry) => entry.id === item.id).tags, ['Japan', 'Paid']);
+  assert.equal(result.state.reminders.find((entry) => entry.id === reminder.id).time, '10:30');
+  assert.equal(result.state.today.items[item.id].order, 12);
+  assert.equal(result.state.today.items[item.id].source, 'planned');
+  assert.equal(result.state.settings.theme, 'dark');
+});
+
+test('same-field Category, Reminder, and Today changes become explicit conflicts', () => {
+  const base = branch().s;
+  const item = base.items[0];
+  const category = createCategory(base, 'Shared category', at).category;
+  const reminder = addReminder(base, item.id, { type: 'absolute', at: '2026-08-12T09:00:00.000Z' }, at).reminder;
+  addToToday(base, item.id, 'manual', at);
+  const local = structuredClone(base);
+  const remote = structuredClone(base);
+  renameCategory(local, category.id, 'Local name', at);
+  renameCategory(remote, category.id, 'Cloud name', at);
+  updateReminder(local, reminder.id, { time: '08:30' }, at);
+  updateReminder(remote, reminder.id, { time: '11:45' }, at);
+  local.today.items[item.id].order = 4;
+  remote.today.items[item.id].order = 9;
+  const result = mergeDatasets(base, local, remote, { at });
+  assert.ok(result.conflicts.some((conflict) => conflict.entityType === 'category' && conflict.field === 'title'));
+  assert.ok(result.conflicts.some((conflict) => conflict.entityType === 'reminder' && conflict.field === 'time'));
+  assert.ok(result.conflicts.some((conflict) => conflict.entityType === 'today' && conflict.field === 'order'));
+  assert.equal(canPushState(result.state).reason, 'unresolved_conflicts');
+});
+
+test('conflicted entity is push-blocked while cloud projection preserves remote disputed data and carries unrelated safe changes', () => {
+  const base = branch().s;
+  const disputed = base.items[0];
+  const unrelated = createItem(base, { categoryId: base.categories[0].id, title: 'Unrelated' }, at).item;
+  const local = structuredClone(base);
+  const remote = structuredClone(base);
+  setNotes(local, disputed.id, 'local version', at);
+  setNotes(remote, disputed.id, 'cloud version', at);
+  setPriority(local, unrelated.id, 'high', at);
+  const result = mergeDatasets(base, local, remote, { at });
+  assert.equal(canPushState(result.state).reason, 'unresolved_conflicts');
+  assert.equal(canPushState(result.cloudState).ok, true);
+  assert.equal(result.cloudState.items.find((item) => item.id === disputed.id).notes, 'cloud version');
+  assert.equal(result.cloudState.items.find((item) => item.id === unrelated.id).priority, 'high');
+  assert.equal(result.safeChanges, true);
+});
+
+test('different parent moves are structural conflicts and cannot create a hidden cycle', () => {
+  const base = branch().s;
+  const moved = base.items[0];
+  const left = createItem(base, { categoryId: base.categories[0].id, title: 'Left' }, at).item;
+  const right = createItem(base, { categoryId: base.categories[0].id, title: 'Right' }, at).item;
+  const local = structuredClone(base);
+  const remote = structuredClone(base);
+  local.items.find((item) => item.id === moved.id).parentId = left.id;
+  remote.items.find((item) => item.id === moved.id).parentId = right.id;
+  const result = mergeDatasets(base, local, remote, { at });
+  assert.ok(result.conflicts.some((conflict) => conflict.type === 'parent' && conflict.itemId === moved.id));
+  assert.equal(result.cloudState.items.find((item) => item.id === moved.id).parentId, right.id);
+});
+
+test('account or dataset switch requires an independent full backup or a second explicit risk acknowledgement', () => {
+  const current = branch().s;
+  const incoming = makeEmptyState(at);
+  const before = structuredClone(current);
+  let gate = datasetSwitchGate(current);
+  assert.equal(gate.allowed, false);
+  assert.equal(gate.requiresRiskAcknowledgement, true);
+  const refused = prepareDatasetSwitch(current, incoming, { riskAccepted: false, at });
+  assert.equal(refused.ok, false);
+  assert.deepEqual(current, before);
+  assert.equal(refused.state.meta.datasetId, current.meta.datasetId);
+  gate = datasetSwitchGate(current, { riskAccepted: true });
+  assert.equal(gate.allowed, true);
+  assert.equal(gate.backedUp, false);
+  const prepared = prepareDatasetSwitch(current, incoming, { riskAccepted: true, at });
+  assert.equal(prepared.ok, true);
+  assert.equal(prepared.safety.sourceDatasetId, current.meta.datasetId);
+  assert.equal(prepared.safety.targetDatasetId, incoming.meta.datasetId);
+  assert.equal(prepared.state.recoverySnapshots.at(-1).kind, 'dataset_switch');
+  current.backupMeta.push({ id: 'full_backup', scope: 'full', independentlyRestorable: true, createdAt: at });
+  assert.equal(datasetSwitchGate(current).allowed, true);
+});
+
+function jsonResponse(value, status = 200) {
+  return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
+}
+
+function mockDrive(responder) {
+  const calls = [];
+  const drive = new GoogleDriveSync({ fetchImpl: async (url, options = {}) => {
+    calls.push({ url: String(url), options });
+    return responder(String(url), options, calls);
+  } });
+  drive.accessToken = 'test-access-token';
+  drive.tokenExpiresAt = Date.now() + 60_000;
+  return { drive, calls };
+}
+
+test('Drive pull selects exactly one matching datasetId and ignores trashed files', async () => {
+  const remote = makeEmptyState(at);
+  remote.meta.datasetId = 'dataset-a';
+  const files = [
+    { id: 'file-a', name: 'progress-tracker-sync.json', trashed: false, appProperties: { datasetId: 'dataset-a' } },
+    { id: 'file-b', name: 'progress-tracker-sync.json', trashed: false, appProperties: { datasetId: 'dataset-b' } },
+    { id: 'file-trash', name: 'progress-tracker-sync.json', trashed: true, appProperties: { datasetId: 'dataset-a' } },
+  ];
+  const { drive } = mockDrive((url) => {
+    if (url.includes('?alt=media')) return jsonResponse({ identity: { datasetId: 'dataset-a' }, state: remote });
+    return jsonResponse({ files });
+  });
+  const result = await drive.pull('dataset-a');
+  assert.equal(result.status, 'remote');
+  assert.equal(result.file.id, 'file-a');
+  assert.equal(result.state.meta.datasetId, 'dataset-a');
+});
+
+test('Drive pull requires an explicit choice for duplicate or unrelated datasets', async () => {
+  const duplicateFiles = [
+    { id: 'file-a1', trashed: false, appProperties: { datasetId: 'dataset-a' } },
+    { id: 'file-a2', trashed: false, appProperties: { datasetId: 'dataset-a' } },
+  ];
+  let mocked = mockDrive(() => jsonResponse({ files: duplicateFiles }));
+  let result = await mocked.drive.pull('dataset-a');
+  assert.equal(result.status, 'dataset_choice');
+  assert.equal(result.reason, 'duplicate_dataset_files');
+  mocked = mockDrive(() => jsonResponse({ files: [{ id: 'file-b', trashed: false, appProperties: { datasetId: 'dataset-b' } }] }));
+  result = await mocked.drive.pull('dataset-a');
+  assert.equal(result.status, 'dataset_choice');
+  assert.equal(result.reason, 'dataset_not_found');
+});
+
+test('Drive rejects appProperties versus payload identity mismatch', async () => {
+  const remote = makeEmptyState(at);
+  remote.meta.datasetId = 'dataset-b';
+  const { drive } = mockDrive((url) => {
+    if (url.includes('?alt=media')) return jsonResponse({ identity: { datasetId: 'dataset-b' }, state: remote });
+    return jsonResponse({ files: [{ id: 'file-a', trashed: false, appProperties: { datasetId: 'dataset-a' } }] });
+  });
+  const result = await drive.pull('dataset-a');
+  assert.equal(result.status, 'wrong_dataset');
+  assert.equal(result.actualDatasetId, 'dataset-a');
+});
+
+test('stale persisted Drive fileId falls back to a fresh exact dataset lookup', async () => {
+  const remote = makeEmptyState(at);
+  remote.meta.datasetId = 'dataset-a';
+  const { drive, calls } = mockDrive((url) => {
+    if (url.includes('/stale-file?fields=')) return jsonResponse({ error: 'not found' }, 404);
+    if (url.includes('?alt=media')) return jsonResponse({ identity: { datasetId: 'dataset-a' }, state: remote });
+    return jsonResponse({ files: [{ id: 'fresh-file', trashed: false, appProperties: { datasetId: 'dataset-a' } }] });
+  });
+  const result = await drive.pull('dataset-a', 'stale-file');
+  assert.equal(result.status, 'remote');
+  assert.equal(result.file.id, 'fresh-file');
+  assert.ok(calls.some((call) => call.url.includes('/stale-file?fields=')));
+});
+
+test('Drive treats a list containing only deleted files as empty and blocks push to a wrong dataset file', async () => {
+  let mocked = mockDrive(() => jsonResponse({ files: [{ id: 'deleted-file', trashed: true, appProperties: { datasetId: 'dataset-a' } }] }));
+  let result = await mocked.drive.pull('dataset-a');
+  assert.equal(result.status, 'empty');
+  const state = makeEmptyState(at);
+  state.meta.datasetId = 'dataset-a';
+  mocked = mockDrive((url) => {
+    if (url.includes('/wrong-file?fields=')) return jsonResponse({ id: 'wrong-file', trashed: false, appProperties: { datasetId: 'dataset-b' } });
+    throw new Error('upload must not be attempted');
+  });
+  await assert.rejects(() => mocked.drive.push(state, 'wrong-file'), (error) => error.code === 'dataset_mismatch');
+  assert.equal(mocked.calls.length, 1);
 });

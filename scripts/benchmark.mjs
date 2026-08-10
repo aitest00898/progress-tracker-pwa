@@ -2,15 +2,21 @@ import { pathToFileURL } from 'node:url';
 import {
   descendantsOf,
   derivedTodayItems,
+  moveSubtree,
   progressForItem,
   searchItems,
+  setItemStatus,
+  setNotes,
+  setPriority,
   smartViewItems,
 } from '../src/engine.js';
-import { DAY_MS, makeCategory, makeEmptyState, makeItem } from '../src/schema.js';
+import { planStateChanges } from '../src/db.js';
+import { DAY_MS, makeCategory, makeEmptyState, makeItem, normalizeState } from '../src/schema.js';
 
 export const REFERENCE_TIME = new Date('2026-08-10T09:00:00.000Z');
 const DEFAULT_ITEM_COUNT = 2500;
 const DEFAULT_SAMPLES = 5;
+const DEEP_CHAIN_LENGTH = 12;
 
 function numericArgument(name, fallback) {
   const index = process.argv.indexOf(name);
@@ -33,7 +39,11 @@ export function buildFixture(itemCount) {
   for (let index = 0; index < itemCount; index += 1) {
     const categoryIndex = index % categoryCount;
     const localIndex = byCategory[categoryIndex].length;
-    const parentIndex = localIndex === 0 ? -1 : Math.floor((localIndex - 1) / 5);
+    const parentIndex = localIndex === 0
+      ? -1
+      : localIndex < DEEP_CHAIN_LENGTH
+        ? localIndex - 1
+        : Math.floor((localIndex - DEEP_CHAIN_LENGTH) / 5);
     const parentId = parentIndex < 0 ? null : byCategory[categoryIndex][parentIndex].id;
     const createdAt = new Date(REFERENCE_TIME.getTime() - (index % 90) * DAY_MS).toISOString();
     const item = {
@@ -126,12 +136,32 @@ export function runBenchmark({ itemCount = DEFAULT_ITEM_COUNT, samples = DEFAULT
     smartRecentlyActive: () => smartViewItems(state, 'recentlyActive', REFERENCE_TIME),
   };
   const measurements = Object.fromEntries(Object.entries(operations).map(([name, action]) => [name, measure(action, samples)]));
+  const mutationTarget = state.items[Math.min(state.items.length - 1, Math.max(1, Math.floor(state.items.length * 0.82)))];
+  const moveTarget = roots.find((root) => root.categoryId !== mutationTarget.categoryId) ?? roots[0];
+  const mutationPlan = (mutator) => () => {
+    const draft = structuredClone(state);
+    mutator(draft);
+    return planStateChanges(state, draft);
+  };
+  const persistenceOperations = {
+    priority: mutationPlan((draft) => setPriority(draft, mutationTarget.id, mutationTarget.priority === 'high' ? 'medium' : 'high', REFERENCE_TIME.toISOString())),
+    complete: mutationPlan((draft) => setItemStatus(draft, mutationTarget.id, 'completed', { force: true, at: REFERENCE_TIME.toISOString() })),
+    notes: mutationPlan((draft) => setNotes(draft, mutationTarget.id, `${mutationTarget.notes} persistence benchmark`, REFERENCE_TIME.toISOString())),
+    moveSubtree: mutationPlan((draft) => moveSubtree(draft, mutationTarget.id, { categoryId: moveTarget.categoryId, parentId: moveTarget.id }, REFERENCE_TIME.toISOString())),
+  };
+  const persistence = Object.fromEntries(Object.entries(persistenceOperations).map(([name, action]) => {
+    const plan = action();
+    return [name, { ...measure(action, samples), writeOperations: plan.operationCount, stores: Object.keys(plan.stores) }];
+  }));
+  const loadNormalize = measure(() => normalizeState(structuredClone(state), REFERENCE_TIME.toISOString()), samples);
   return {
-    benchmarkVersion: 1,
+    benchmarkVersion: 2,
     runtime: process.version,
     fixture: { items: state.items.length, history: state.history.length, categories: state.categories.length, maxDepth: maxDepth(state) },
     samples,
     measurements,
+    persistence,
+    loadNormalize,
   };
 }
 

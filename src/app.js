@@ -1,4 +1,5 @@
-import { t, formatDate, formatDateTime, relativeDueText } from './i18n.js';
+import { t, documentShell, formatDate, formatDateTime, relativeDueText } from './i18n.js';
+import { nextThemePreference, resolveTheme } from './appearance.js';
 import { clone, dateKey, isoNow, makeEmptyState, newId } from './schema.js';
 import {
   addReminder, addToToday, ancestorsOf, applyDailyRollover, attentionScore, canMove, childrenOf, completionNeedsConfirmation,
@@ -12,10 +13,13 @@ import {
 import { renderMarkdown } from './markdown.js';
 import { VirtualList } from './virtual-list.js';
 import { downloadText } from './storage.js';
+import { browserStorageEstimate, storageBreakdown } from './storage-metrics.js';
 import { exportPTMD, parsePTMD, previewImport, applyImportPreview, restorePreview } from './ptmd.js';
 import { diagnosticReport, dataHealth, recordError, recordPerformance, recordSemantic, capabilityReport, clearDiagnostics } from './diagnostics.js';
-import { GoogleDriveSync, mergeDatasets, resolveConflict } from './sync.js';
-import { makeMigrationSnapshot, restoreMigrationSnapshot } from './migration.js';
+import {
+  canPushState, datasetSwitchGate, GoogleDriveSync, mergeDatasets, prepareDatasetSwitch, resolveConflict,
+} from './sync.js';
+import { restoreMigrationSnapshot } from './migration.js';
 
 const root = document.querySelector('#app');
 let repository;
@@ -313,37 +317,40 @@ function render() {
   const state = currentState();
   renderNow = new Date();
   renderEngineIndex = createEngineIndex(state);
-  document.documentElement.lang = language() === 'en' ? 'en' : 'zh-Hant-TW';
-  document.title = tr('appName');
-  document.documentElement.dataset.theme = resolvedTheme(state.settings.theme);
-  const themeMeta = document.querySelector('meta[name="theme-color"]'); if (themeMeta) themeMeta.content = resolvedTheme(state.settings.theme) === 'dark' ? '#10131c' : '#f7f8fb';
+  const shell = documentShell(language());
+  document.documentElement.lang = shell.lang;
+  document.title = shell.title;
+  const descriptionMeta = document.querySelector('meta[name="description"]');
+  if (descriptionMeta) descriptionMeta.content = shell.description;
+  const manifestLink = document.querySelector('link[rel="manifest"]');
+  if (manifestLink && manifestLink.getAttribute('href') !== shell.manifest) manifestLink.setAttribute('href', shell.manifest);
+  const visualTheme = resolveTheme(state.settings.theme, Boolean(globalThis.matchMedia?.('(prefers-color-scheme: dark)').matches));
+  document.documentElement.dataset.theme = visualTheme;
+  const themeMeta = document.querySelector('meta[name="theme-color"]'); if (themeMeta) themeMeta.content = visualTheme === 'dark' ? '#0b0b0f' : '#f2f2f7';
+  const appleTitle = document.querySelector('meta[name="apple-mobile-web-app-title"]'); if (appleTitle) appleTitle.content = shell.title;
   activeVirtualList?.destroy();
   activeVirtualList = null;
   root.replaceChildren(renderShell(state));
-}
-
-function resolvedTheme(theme) {
-  if (theme === 'dark') return 'dark';
-  if (theme === 'light') return 'light';
-  return globalThis.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 }
 
 function renderShell(state) {
   const index = renderIndex(state);
   const shell = node('div', { class: 'app-shell' });
   shell.append(renderTopbar(state));
-  const body = node('div', { class: 'app-body' });
-  body.append(renderSidebar(state));
+  const recoveryMode = state.meta.recoveryMode;
+  const body = node('div', { class: `app-body ${recoveryMode ? 'recovery-only' : ''}` });
+  if (!recoveryMode) body.append(renderSidebar(state));
   const main = node('main', { class: 'main-content', id: 'main-content' });
-  if (state.meta.recoveryMode) main.append(renderRecoveryMode(state));
+  if (recoveryMode) main.append(renderRecoveryMode(state));
   else if (ui.page === 'today') main.append(renderTodayPage(state));
   else if (ui.page === 'reminders') main.append(renderReminderPage(state));
   else if (ui.page === 'smart') main.append(renderSmartPage(state));
   else if (ui.page === 'settings') main.append(renderSettingsPage(state));
   else main.append(renderCategoryPage(state));
   body.append(main);
-  shell.append(body, renderMobileNav(state));
-  const detailItem = ui.detailId ? getItem(state, ui.detailId, index) : null;
+  shell.append(body);
+  if (!recoveryMode) shell.append(renderMobileNav(state));
+  const detailItem = !recoveryMode && ui.detailId ? getItem(state, ui.detailId, index) : null;
   if (detailItem) shell.append(renderDetailPanel(state, detailItem));
   if (ui.modal) shell.append(renderModal(state));
   if (ui.toast) shell.append(node('div', { class: `toast toast-${ui.toast.kind}`, role: 'status' }, node('span', {}, ui.toast.message), ui.toast.undo ? button(tr('undo'), ui.toast.undo, { className: 'toast-undo' }) : null));
@@ -352,7 +359,14 @@ function renderShell(state) {
 
 function renderTopbar(state) {
   const header = node('header', { class: 'topbar' });
-  const brand = node('button', { class: 'brand', type: 'button', onClick: () => setPage('categories', state.settings.defaultCategoryId ?? state.categories[0]?.id) }, node('span', { class: 'brand-mark' }, '◔'), node('span', { class: 'brand-copy' }, node('strong', {}, tr('appName')), node('small', {}, tr('brandTagline'))));
+  if (state.meta.recoveryMode) {
+    header.append(
+      node('div', { class: 'brand recovery-brand' }, node('span', { class: 'brand-mark', ariaLabel: tr('appName'), role: 'img' }, node('span', { class: 'brand-check' }, '✓')), node('span', { class: 'brand-copy' }, node('strong', {}, tr('appName')), node('small', {}, tr('dataRecoveryMode')))),
+      node('div', { class: 'topbar-recovery-spacer' }),
+    );
+    return header;
+  }
+  const brand = node('button', { class: 'brand', type: 'button', onClick: () => setPage('categories', state.settings.defaultCategoryId ?? state.categories[0]?.id) }, node('span', { class: 'brand-mark', ariaLabel: tr('appName'), role: 'img' }, node('span', { class: 'brand-check' }, '✓')), node('span', { class: 'brand-copy' }, node('strong', {}, tr('appName')), node('small', {}, tr('brandTagline'))));
   const search = node('input', { class: 'global-search', type: 'search', placeholder: tr('searchPlaceholder'), value: ui.search, ariaLabel: tr('searchPlaceholder'), onInput: (event) => { ui.search = event.target.value; scheduleRender(); }, onKeydown: (event) => { if (event.key === 'Escape') { ui.search = ''; scheduleRender(); } } });
   const online = navigator.onLine;
   const storageLabel = repository.volatile ? tr('storageVolatile') : online ? tr('connectionOnline') : tr('connectionOffline');
@@ -363,8 +377,8 @@ function renderTopbar(state) {
 }
 
 function cycleTheme(state) {
-  const next = state.settings.theme === 'system' ? 'dark' : state.settings.theme === 'dark' ? 'light' : 'system';
-  mutate('theme_changed', (draft) => { draft.settings.theme = next; recordSemantic(draft, 'setting_changed', { fieldCount: 1 }); return { ok: true }; }, 'themeChanged', { queue: false });
+  const next = nextThemePreference(state.settings.theme);
+  updateSetting('theme_changed', (settings) => { settings.theme = next; }, 'themeChanged');
 }
 
 function renderSidebar(state) {
@@ -429,7 +443,18 @@ function renderCategoryBreadcrumb(state, category) {
 
 function renderQuickCreate(state, category) {
   const form = node('form', { class: 'quick-create', onSubmit: (event) => { stop(event); createFromQuickInput(state, category.id); } });
-  const input = node('input', { class: 'quick-create-input', type: 'text', placeholder: tr('quickCreatePlaceholder'), ariaLabel: tr('addItem') });
+  const input = node('input', {
+    class: 'quick-create-input',
+    type: 'text',
+    placeholder: tr('quickCreatePlaceholder'),
+    ariaLabel: tr('addItem'),
+    onKeydown: (event) => {
+      if (event.key === 'Enter' && !event.isComposing) {
+        stop(event);
+        void createFromQuickInput(state, category.id);
+      }
+    },
+  });
   const mode = node('label', { class: 'continuous-toggle' }, node('input', { type: 'checkbox', checked: ui.continuousCreate, onChange: (event) => { ui.continuousCreate = event.target.checked; } }), node('span', {}, tr('quickCreateHint')));
   form.append(node('span', { class: 'quick-create-mark' }, '+'), input, button(tr('addItem'), () => createFromQuickInput(state, category.id), { className: 'primary-button quick-create-button' }), mode);
   return form;
@@ -525,14 +550,14 @@ function renderItemRow(state, item, { depth = 0, tree = true, pathContext = fals
   const nextStatus = item.status === 'completed' ? 'active' : item.status === 'skipped' ? 'active' : 'completed';
   const statusButton = button(item.status === 'completed' ? '✓' : item.status === 'skipped' ? '–' : '○', () => conflict ? blockConflictedEdit() : performStatus(item, nextStatus), { className: `status-button ${item.status}`, ariaLabel: item.status === 'completed' ? tr('reopen') : item.status === 'skipped' ? tr('unskip') : tr('complete'), title: item.status === 'completed' ? tr('reopen') : item.status === 'skipped' ? tr('unskip') : tr('complete') });
   const ring = node('span', { class: 'progress-ring', style: { '--progress': `${progress}%` }, ariaLabel: tr('progressPercent', { value: progress }) }, node('span', {}, `${Math.round(progress)}%`));
-  const title = node('button', { type: 'button', class: 'item-title', onClick: () => { if (pathContext) focusItem(item); else if (isParent) toggleExpanded(item); else openDetail(item.id); } }, item.title);
+  const title = node('button', { type: 'button', class: 'item-title', onClick: () => { if (pathContext) focusItem(item); else if (isParent) toggleExpanded(item); else toggleQuickActions(item.id); } }, item.title);
   bindLongPress(title, () => conflict ? blockConflictedEdit() : openRenameItem(item), { duration: 700 });
   const titleLine = node('div', { class: 'item-title-line' }, title, item.importance ? node('span', { class: 'importance-stars', title: tr('importance') }, '★'.repeat(item.importance)) : null, reminders.length ? node('span', { class: 'reminder-symbol', title: tr('reminder'), ariaLabel: tr('reminder') }, '⌁') : null, conflict ? node('span', { class: 'conflict-indicator', title: tr('syncConflict'), ariaLabel: tr('syncConflict') }, '⚠') : null);
   const path = pathContext ? node('span', { class: 'item-path-context' }, pathString(state, item.id, index)) : null;
   const meta = node('div', { class: `item-meta ${pathContext ? 'with-path' : ''}` }, node('span', { class: `due-text ${overdue ? 'overdue' : isToday ? 'today' : ''}`, title: due.source === 'inherited' ? tr('inherited') : due.source === 'explicit' ? tr('explicit') : tr('noDeadline') }, dueText), item.tags.length ? node('span', { class: 'tag-count' }, `#${item.tags.length}`) : null, path);
   const info = node('div', { class: 'item-main' }, titleLine, meta);
   const chevron = iconButton('›', tr('detail'), () => openDetail(item.id), { className: 'detail-chevron' });
-  const main = node('div', { class: `item-row-main ${showRing ? 'parent' : 'leaf'}`, onClick: (event) => { if (event.target.closest('button, input')) return; if (isParent) toggleExpanded(item); else openDetail(item.id); } }, handle, statusButton, showRing ? ring : null, info, chevron);
+  const main = node('div', { class: `item-row-main ${showRing ? 'parent' : 'leaf'}`, onClick: (event) => { if (event.target.closest('button, input')) return; toggleQuickActions(item.id); } }, handle, statusButton, showRing ? ring : null, info, chevron);
   const actionRow = node('div', { class: 'item-actions' }, button(item.status === 'completed' ? tr('reopen') : item.status === 'skipped' ? tr('unskip') : tr('complete'), () => conflict ? blockConflictedEdit() : performStatus(item, nextStatus), { className: 'row-action', icon: item.status === 'completed' ? '↺' : '✓' }), button(tr('addChild'), () => conflict ? blockConflictedEdit() : (ui.quickActionId = item.id, ui.addChildFor = item.id, scheduleRender()), { className: 'row-action', icon: '+' }), button(state.today.items[item.id] ? tr('removeFromToday') : tr('moveToToday'), () => conflict ? blockConflictedEdit() : toggleToday(item), { className: 'row-action', icon: '◷' }), iconButton('⋯', tr('more'), (event) => { stop(event); if (conflict) blockConflictedEdit(); else openItemMenu(item); }, { className: 'row-action-more' }));
   row.append(main, actionRow);
   if (ui.quickActionId === item.id) row.append(renderQuickActionRow(state, item));
@@ -542,6 +567,12 @@ function renderItemRow(state, item, { depth = 0, tree = true, pathContext = fals
 
 function renderQuickActionRow(state, item) {
   const row = node('div', { class: 'quick-action-row' }, node('span', { class: 'quick-action-label' }, tr('more')), button(tr('addChild'), () => itemHasConflict(state, item.id) ? blockConflictedEdit() : openChildCreate(item), { className: 'quick-action-button' }), button(state.today.items[item.id] ? tr('removeFromToday') : tr('moveToToday'), () => itemHasConflict(state, item.id) ? blockConflictedEdit() : toggleToday(item), { className: 'quick-action-button' }), node('label', { class: 'quick-priority' }, tr('priority'), node('select', { value: item.priority, ariaLabel: tr('priority'), onChange: (event) => itemHasConflict(currentState(), item.id) ? blockConflictedEdit() : mutate('priority_changed', (draft) => setPriority(draft, item.id, event.target.value) , 'priorityChanged') }, ...['none', 'low', 'medium', 'high'].map((value) => node('option', { value }, priorityLabel(value))))), button(tr('close'), () => { ui.quickActionId = null; scheduleRender(); }, { className: 'quick-action-button' }));
+  return row;
+}
+
+function toggleQuickActions(itemId) {
+  ui.quickActionId = ui.quickActionId === itemId ? null : itemId;
+  scheduleRender();
 }
 
 function toggleExpanded(item) {
@@ -802,7 +833,7 @@ function renderConflictSection(state, item) {
   const conflicts = renderIndex(state).conflictsByItem.get(item.id) ?? [];
   if (!conflicts.length) return null;
   const section = node('section', { class: 'detail-section conflict-section' }, heading(tr('syncConflict'), 3), node('p', { class: 'warning-note' }, `${tr('conflictArchive')} ${tr('conflictEditBlocked')}`));
-  for (const conflict of conflicts) section.append(node('div', { class: 'conflict-row' }, node('div', {}, node('strong', {}, conflict.field ? fieldLabel(conflict.field) : tr('syncConflict')), node('small', {}, tr('conflictResolve'))), node('div', { class: 'conflict-actions' }, button(tr('conflictKeepLocal'), () => resolveOneConflict(conflict.id, 'local'), { className: 'small-button' }), button(tr('conflictKeepCloud'), () => resolveOneConflict(conflict.id, 'remote'), { className: 'small-button' }))));
+  for (const conflict of conflicts) section.append(renderConflictComparison(conflict));
   return section;
 }
 
@@ -839,8 +870,8 @@ export async function mountApp(repo) {
     await repository.update('capabilities', (draft) => { draft.capabilities = capabilityReport(); recordSemantic(draft, 'page_opened', { page: ui.page }); recordPerformance(draft, 'startup', performance.now() - startupStartedAt, { itemCount: draft.items.length }); return { ok: true }; }, null, { queue: false });
     if (navigator.storage?.estimate) {
       try {
-        const estimate = await navigator.storage.estimate();
-        if (Number.isFinite(estimate.quota) && Number.isFinite(estimate.usage)) await repository.update('storage_capability', (draft) => { draft.capabilities.storageQuota = estimate.quota; draft.capabilities.storageUsage = estimate.usage; return { ok: true }; }, null, { queue: false });
+        const estimate = browserStorageEstimate(await navigator.storage.estimate());
+        if (estimate) await repository.update('storage_capability', (draft) => { draft.capabilities.storageEstimate = estimate; return { ok: true }; }, null, { queue: false });
       } catch { /* optional capability; omit unreliable values */ }
     }
   }
@@ -1054,7 +1085,14 @@ function renderSettingsPage(state) {
 
 function settingsToggle(label, checked, onChange, hint = null) { return node('label', { class: 'settings-toggle' }, node('span', {}, node('strong', {}, label), hint ? node('small', {}, hint) : null), node('input', { type: 'checkbox', checked, onChange }), node('span', { class: 'switch-track' })); }
 
-function updateSetting(label, updater, success = null) { return mutate(label, (state) => { updater(state.settings); recordSemantic(state, 'setting_changed', { fieldCount: 1 }); return { ok: true }; }, success, { queue: false }); }
+async function updateSetting(label, updater, success = null) {
+  const result = await mutate(label, (state) => { updater(state.settings); recordSemantic(state, 'setting_changed', { fieldCount: 1 }); return { ok: true }; }, success, { queue: false });
+  if (result.ok && ['language_changed', 'theme_changed'].includes(label)) {
+    const settings = currentState().settings;
+    localStorage.setItem('progress-tracker-shell', JSON.stringify({ language: settings.language, theme: settings.theme }));
+  }
+  return result;
+}
 
 function renderGeneralSettings(state) {
   const section = node('div', { class: 'settings-stack' });
@@ -1087,29 +1125,85 @@ function renderExperimentalSettings(state) {
 function renderDataSettings(state) {
   const deletedHistory = state.deleted.reduce((sum, entry) => sum + (entry.snapshot?.history?.length ?? 0), 0);
   const stats = { items: state.items.length, completed: state.items.filter((item) => item.status === 'completed').length, deleted: state.deleted.length, history: state.history.length + deletedHistory };
-  const usage = (() => { try { const { storageBreakdown } = requireEngineForUsage(); return storageBreakdown(state); } catch { return { total: 0, breakdown: {} }; } })();
+  const usage = storageBreakdown(state);
   const lastBackup = state.backupMeta.filter((backup) => backup.scope === 'full').sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
   const section = node('div', { class: 'settings-stack' });
   section.append(settingCard(tr('dataOverview'), metricGrid([[tr('itemCount'), stats.items], [tr('completedCount'), stats.completed], [tr('deletedCount'), stats.deleted], [tr('historyCount'), stats.history], [tr('lastBackup'), lastBackup ? formatDateTime(language(), lastBackup.createdAt) : tr('notBackedUp')]])));
   section.append(renderExportCard(state), renderImportCard(), renderFullRestoreCard(), renderCloudCard(state), renderActiveConflicts(state), renderRecycleBin(state), renderRecoveryCard(state), renderDangerousDataCard());
-  const quota = state.capabilities?.storageQuota && state.capabilities?.storageUsage !== undefined ? `${tr('quotaAvailable')}: ${formatBytes(Math.max(0, state.capabilities.storageQuota - state.capabilities.storageUsage))}` : tr('quotaUnavailable');
-  section.append(settingCard(tr('localStorage'), node('div', { class: 'usage-list' }, node('strong', {}, `${tr('localUsage')}: ${formatBytes(usage.total)}`), ...Object.entries(usage.breakdown).map(([key, value]) => node('div', { class: 'usage-row' }, node('span', {}, tr({ items: 'usageItems', notes: 'usageNotes', history: 'usageHistory', reminders: 'usageReminders', deleted: 'usageDeleted', sync: 'usageSync', conflicts: 'usageConflicts' }[key] ?? key)), node('span', {}, formatBytes(value))))), node('p', { class: 'field-hint' }, quota)));
+  const labels = {
+    metadata: 'usageMetadata', categories: 'usageCategories', items: 'usageItems', notes: 'usageNotes', tags: 'usageTags', history: 'usageHistory', reminders: 'usageReminders',
+    today: 'usageToday', deleted: 'usageDeleted', sync: 'usageSync', conflicts: 'usageConflicts', backup: 'usageBackup',
+    recovery: 'usageRecovery', diagnostics: 'usageDiagnostics', settings: 'usageSettings',
+  };
+  const estimate = state.capabilities?.storageEstimate ?? null;
+  section.append(settingCard(
+    tr('localStorage'),
+    node('div', { class: 'usage-list' },
+      node('strong', {}, `${tr('logicalUsageEstimate')}: ${formatBytes(usage.total)}`),
+      ...Object.entries(usage.breakdown).map(([key, value]) => node('div', { class: 'usage-row' }, node('span', {}, tr(labels[key] ?? key)), node('span', {}, formatBytes(value)))),
+    ),
+    heading(tr('browserStorageEstimate'), 3),
+    estimate ? node('div', { class: 'usage-list' },
+      node('div', { class: 'usage-row' }, node('span', {}, tr('browserUsage')), node('span', {}, formatBytes(estimate.usage))),
+      node('div', { class: 'usage-row' }, node('span', {}, tr('browserQuota')), node('span', {}, formatBytes(estimate.quota))),
+      node('div', { class: 'usage-row' }, node('span', {}, tr('browserAvailable')), node('span', {}, formatBytes(estimate.available))),
+    ) : node('p', { class: 'field-hint' }, tr('quotaUnavailable')),
+  ));
   return section;
 }
 
-function conflictTypeLabel(type) { return tr({ order: 'conflictTypeOrder', parent: 'conflictTypeParent', delete_edit: 'conflictTypeDeleteEdit', field: 'conflictTypeField', new_item: 'conflictTypeNewItem' }[type] ?? 'syncConflict'); }
+function conflictTypeLabel(type) { return tr({ order: 'conflictTypeOrder', parent: 'conflictTypeParent', delete_edit: 'conflictTypeDeleteEdit', field: 'conflictTypeField', membership: 'conflictTypeMembership', new_entity: 'conflictTypeNewEntity', new_item: 'conflictTypeNewItem' }[type] ?? 'syncConflict'); }
+
+function conflictFieldLabel(conflict) {
+  if (conflict.field === 'title' && conflict.entityType === 'category') return tr('categoryName');
+  const key = {
+    time: 'reminderTime', at: 'reminderAbsolute', offsetDays: 'reminderOffset', enabled: 'reminderEnable',
+    source: 'todaySource', order: 'itemOrderSaved', location: 'selectParent',
+  }[conflict.field];
+  return key ? tr(key) : fieldLabel(conflict.field);
+}
+
+function conflictValue(value) {
+  if (value === null || value === undefined) return tr('none');
+  if (typeof value === 'string') return value || tr('none');
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return JSON.stringify(value, null, 2);
+}
+
+function renderConflictComparison(conflict, interactive = true) {
+  const label = conflict.field ? conflictFieldLabel(conflict) : conflictTypeLabel(conflict.type);
+  const entityLabel = tr({
+    item: 'entityItem', category: 'entityCategory', reminder: 'entityReminder', today: 'entityToday',
+    settings: 'entitySettings', sibling_order: 'entityOrder', smart_order: 'entityOrder', deleted: 'entityDeleted',
+    history: 'entityHistory', backup: 'entityBackup',
+  }[conflict.entityType] ?? 'entityItem');
+  const card = node('article', { class: 'conflict-card' },
+    node('div', { class: 'conflict-card-header' },
+      node('div', {}, node('strong', {}, label), node('small', {}, `${conflictTypeLabel(conflict.type)} · ${entityLabel}`)),
+      node('span', { class: 'sync-warning', ariaLabel: tr('syncConflict'), title: tr('syncConflict') }, '⚠'),
+    ),
+    node('div', { class: 'conflict-versions' },
+      node('section', { class: 'conflict-version base' }, node('span', {}, tr('conflictBase')), node('pre', {}, conflictValue(conflict.baseState))),
+      node('section', { class: 'conflict-version local' }, node('span', {}, tr('conflictLocal')), node('pre', {}, conflictValue(conflict.localState))),
+      node('section', { class: 'conflict-version cloud' }, node('span', {}, tr('conflictCloud')), node('pre', {}, conflictValue(conflict.remoteState))),
+    ),
+  );
+  if (interactive) card.append(node('div', { class: 'conflict-actions' },
+    button(tr('chooseLocal'), () => resolveOneConflict(conflict.id, 'local'), { className: 'secondary-button' }),
+    button(tr('chooseCloud'), () => resolveOneConflict(conflict.id, 'remote'), { className: 'secondary-button' }),
+  ));
+  return card;
+}
 
 function renderActiveConflicts(state) {
   if (!state.conflicts.length) return settingCard(tr('activeConflicts'), node('p', { class: 'muted' }, tr('noActiveConflicts')));
   const list = node('div', { class: 'conflict-list' });
   for (const conflict of state.conflicts) {
-    const item = conflict.itemId ? getItem(state, conflict.itemId) : null;
-    list.append(node('div', { class: 'conflict-list-row' }, node('div', {}, node('strong', {}, item?.title ?? conflictTypeLabel(conflict.type)), node('small', {}, `${conflict.field ? fieldLabel(conflict.field) : conflictTypeLabel(conflict.type)} · ${tr('conflictResolve')}`)), node('div', { class: 'button-grid' }, button(tr('conflictKeepLocal'), () => resolveOneConflict(conflict.id, 'local'), { className: 'small-button' }), button(tr('conflictKeepCloud'), () => resolveOneConflict(conflict.id, 'remote'), { className: 'small-button' }))));
+    list.append(renderConflictComparison(conflict));
   }
-  return settingCard(tr('activeConflicts'), node('p', { class: 'warning-note' }, tr('conflictArchive')), list);
+  return settingCard(tr('activeConflicts'), node('p', { class: 'warning-note' }, tr('conflictBlocked', { count: state.conflicts.length })), node('p', { class: 'field-hint' }, tr('conflictChoiceRequired')), list);
 }
 
-function requireEngineForUsage() { return { storageBreakdown: (state) => { const bytes = (value) => new TextEncoder().encode(JSON.stringify(value)).byteLength; const breakdown = { items: bytes(state.items), notes: bytes(state.items.map((item) => item.notes)), history: bytes(state.history), reminders: bytes(state.reminders), deleted: bytes(state.deleted), sync: bytes(state.syncChanges), conflicts: bytes(state.conflictArchive) }; return { breakdown, total: Object.values(breakdown).reduce((sum, value) => sum + value, 0) }; } }; }
 function formatBytes(bytes) { if (!bytes) return '0 B'; if (bytes < 1024) return `${bytes} B`; if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`; return `${(bytes / 1048576).toFixed(2)} MB`; }
 function metricGrid(values) { return node('div', { class: 'metric-grid' }, ...values.map(([label, value]) => node('div', { class: 'metric-card' }, node('span', {}, label), node('strong', {}, String(value))))); }
 
@@ -1157,6 +1251,14 @@ async function restoreFileSelected(file) {
 
 function renderCloudCard(state) {
   const cloud = state.settings.cloudSync ?? {};
+  const syncSummary = metricGrid([
+    [tr('syncStatus'), cloud.status ? tr(cloud.status === 'authorized' ? 'cloudSyncConnected' : 'cloudSyncOff') : tr('cloudSyncOff')],
+    [tr('syncAccount'), cloud.accountId ?? tr('notAvailable')],
+    [tr('syncDataset'), state.meta.datasetId],
+    [tr('syncPending'), state.syncChanges.length],
+    [tr('syncConflict'), state.conflicts.length],
+    [tr('syncLast'), cloud.lastSyncAt ? formatDateTime(language(), cloud.lastSyncAt) : tr('notAvailable')],
+  ]);
   const clientId = node('input', { type: 'text', value: cloud.clientId ?? '', placeholder: tr('configureClientId'), ariaLabel: tr('configureClientId'), autocomplete: 'off' });
   const visibleBackups = Array.isArray(cloud.visibleBackups) ? cloud.visibleBackups : [];
   const backupList = cloud.authorized ? node('div', { class: 'cloud-backup-list' }, visibleBackups.length
@@ -1170,10 +1272,11 @@ function renderCloudCard(state) {
     : node('p', { class: 'muted' }, tr('cloudBackupEmpty'))) : null;
   const cloudActions = node('div', { class: 'button-grid' },
     button(tr('googleLogin'), () => authorizeGoogle(clientId.value), { className: 'secondary-button' }),
-    button(tr('syncNow'), () => syncNow(), { className: 'secondary-button', disabled: !cloud.authorized }),
+    button(tr('syncNow'), () => syncNow(), { className: 'secondary-button', disabled: !cloud.authorized || !cloud.enabled }),
     cloud.authorized ? button(tr('googleLogout'), logoutGoogle, { className: 'text-button' }) : null,
-    button(tr('disableCloudSync'), () => updateSetting('cloud_disabled', (settings) => {
-      settings.cloudSync = { ...(settings.cloudSync ?? {}), enabled: false, authorized: false, status: 'configured' };
+    button(tr(cloud.enabled ? 'disableCloudSync' : 'enableCloudSync'), () => updateSetting(cloud.enabled ? 'cloud_disabled' : 'cloud_enabled', (settings) => {
+      const enabled = !cloud.enabled;
+      settings.cloudSync = { ...(settings.cloudSync ?? {}), enabled, status: enabled && settings.cloudSync?.authorized ? 'authorized' : enabled ? 'configured' : 'paused' };
     }, 'savedOffline'), { className: 'text-button' }),
   );
   const backupActions = cloud.authorized ? node('div', { class: 'cloud-backup-actions' },
@@ -1182,7 +1285,7 @@ function renderCloudCard(state) {
     button(tr('cloudDatasetDelete'), () => openConfirm({ title: tr('cloudDatasetDelete'), message: tr('cloudDatasetDeleteQuestion'), danger: true, typed: true, onConfirm: deleteCloudDataset }), { className: 'danger-button' }),
   ) : null;
   const backupSection = cloud.authorized ? node('div', { class: 'cloud-backup-section' }, heading(tr('cloudBackupFolder'), 3), node('p', { class: 'field-hint' }, tr('cloudBackupFolder')), backupList) : null;
-  return settingCard(tr('cloudSync'), node('p', { class: 'field-hint' }, cloud.authorized ? tr('cloudSyncConnected') : tr('cloudSyncOff')), inputField(tr('configureClientId'), clientId, tr('cloudSyncConfig')), cloudActions, backupActions, backupSection, node('p', { class: 'field-hint' }, tr('noFakeSync')));
+  return settingCard(tr('cloudSync'), node('p', { class: 'field-hint' }, cloud.authorized ? tr('cloudSyncConnected') : tr('cloudSyncOff')), syncSummary, inputField(tr('configureClientId'), clientId, tr('cloudSyncConfig')), cloudActions, backupActions, backupSection, node('p', { class: 'field-hint' }, tr('noFakeSync')));
 }
 
 async function authorizeGoogle(clientId) {
@@ -1199,7 +1302,7 @@ async function authorizeGoogle(clientId) {
 async function syncNow({ automatic = false } = {}) {
   const state = currentState();
   const cloud = state.settings.cloudSync ?? {};
-  if (!cloud.authorized || !navigator.onLine || syncInFlight) return;
+  if (!cloud.enabled || !cloud.authorized || !navigator.onLine || syncInFlight) return;
   if (cloud.accountId && state.meta.accountId && cloud.accountId !== state.meta.accountId) {
     ui.modal = { kind: 'dataset', title: tr('datasetMismatch'), remote: null, remoteFile: null, accountMismatch: true };
     scheduleRender();
@@ -1207,9 +1310,19 @@ async function syncNow({ automatic = false } = {}) {
   }
   syncInFlight = true;
   try {
-    const remote = await driveSync.pull();
+    let remote = await driveSync.pull(state.meta.datasetId, cloud.fileId ?? null);
     if (remote.status === 'empty') {
       openConfirm({ title: tr('cloudFirstSync'), message: `${tr('cloudFirstSync')} · ${tr('itemCount')}: ${state.items.length} · ${tr('deletedCount')}: ${state.deleted.length}`, onConfirm: () => pushCloud(state) });
+      return;
+    }
+    if (remote.status === 'dataset_choice') {
+      ui.modal = { kind: 'datasetChoice', title: tr('datasetChoice'), files: remote.files, reason: remote.reason };
+      scheduleRender();
+      return;
+    }
+    if (remote.status === 'wrong_dataset' && remote.file) remote = await driveSync.pullFile(remote.file, null);
+    if (remote.status !== 'remote' || !remote.state) {
+      toast(tr('noCloudFileSelected'), 'error');
       return;
     }
     if (remote.state?.meta?.accountId && state.meta.accountId && remote.state.meta.accountId !== state.meta.accountId) { ui.modal = { kind: 'dataset', title: tr('datasetMismatch'), remote: remote.state, remoteFile: remote.file, accountMismatch: true }; scheduleRender(); return; }
@@ -1222,8 +1335,68 @@ async function syncNow({ automatic = false } = {}) {
   finally { syncInFlight = false; }
 }
 
+async function chooseDatasetFile(file) {
+  try {
+    const expected = file.appProperties?.datasetId === currentState().meta.datasetId ? currentState().meta.datasetId : null;
+    const remote = await driveSync.pullFile(file, expected);
+    if (remote.status !== 'remote' || !remote.state) { toast(tr('errorGeneric'), 'error'); return; }
+    if (remote.state.meta.datasetId !== currentState().meta.datasetId) {
+      ui.modal = { kind: 'dataset', title: tr('datasetMismatch'), remote: remote.state, remoteFile: remote.file };
+      scheduleRender();
+      return;
+    }
+    const base = currentState().meta.syncBaseState ?? currentState();
+    const merge = mergeDatasets(base, currentState(), remote.state);
+    ui.modal = { kind: 'sync', title: tr('syncPreview'), merge, remote: remote.state, remoteFile: remote.file };
+    scheduleRender();
+  } catch (error) {
+    toast(tr('errorGeneric'), 'error');
+    await repository.update('diagnostic_dataset_file_error', (draft) => { recordError(draft, error, 'sync'); return { ok: true }; }, null, { queue: false });
+  }
+}
+
+function renderDatasetChoiceModal(content, modal) {
+  const reasonKey = modal.reason === 'duplicate_dataset_files' ? 'duplicateDatasetFiles' : 'datasetNotFound';
+  content.append(node('p', {}, tr('datasetChoiceHint')), node('p', { class: 'warning-note' }, tr(reasonKey)));
+  const list = node('div', { class: 'dataset-choice-list' });
+  for (const file of modal.files ?? []) {
+    list.append(node('div', { class: 'dataset-choice-row' },
+      node('div', {}, node('strong', {}, file.appProperties?.datasetId ?? tr('unknown')), node('small', {}, file.modifiedTime ? formatDateTime(language(), file.modifiedTime) : file.id)),
+      button(tr('useDataset'), () => chooseDatasetFile(file), { className: 'secondary-button' }),
+    ));
+  }
+  content.append(list, node('div', { class: 'modal-actions' }, button(tr('cancel'), () => { ui.modal = null; scheduleRender(); }, { className: 'text-button' })));
+}
+
 function renderDatasetModal(content, modal) {
-  content.append(node('p', {}, tr('datasetMismatch')), node('p', { class: 'warning-note' }, tr('datasetRisk')), node('div', { class: 'modal-actions vertical' }, button(tr('datasetMerge'), () => modal.remote ? showDatasetMerge(modal.remote, modal.remoteFile) : loadDatasetChoice('merge'), { className: 'secondary-button' }), button(tr('datasetSwitch'), () => modal.remote ? openConfirm({ title: tr('datasetSwitch'), message: tr('datasetRisk'), danger: true, typed: true, onConfirm: () => switchToRemoteDataset(modal.remote, modal.remoteFile) }) : loadDatasetChoice('switch'), { className: 'danger-button' })));
+  content.append(node('p', {}, tr('datasetMismatch')), node('p', { class: 'warning-note' }, tr('datasetRisk')), node('div', { class: 'modal-actions vertical' }, button(tr('datasetMerge'), () => modal.remote ? showDatasetMerge(modal.remote, modal.remoteFile) : loadDatasetChoice('merge'), { className: 'secondary-button' }), button(tr('datasetSwitch'), () => modal.remote ? requestDatasetSwitch(modal.remote, modal.remoteFile) : loadDatasetChoice('switch'), { className: 'danger-button' })));
+}
+
+function requestDatasetSwitch(remote, remoteFile = null) {
+  const gate = datasetSwitchGate(currentState());
+  if (!gate.allowed) {
+    ui.modal = { kind: 'backupGate', title: tr('backupGateTitle'), remote, remoteFile };
+    scheduleRender();
+    return;
+  }
+  openConfirm({ title: tr('datasetSwitch'), message: tr('datasetRisk'), danger: true, typed: true, onConfirm: () => switchToRemoteDataset(remote, remoteFile) });
+}
+
+function renderBackupGateModal(content, modal) {
+  content.append(
+    node('p', {}, tr('backupGateMessage')),
+    node('div', { class: 'modal-actions vertical' },
+      button(tr('createBackupFirst'), () => { exportData('full'); ui.modal = null; scheduleRender(); }, { className: 'primary-button' }),
+      button(tr('continueWithoutBackup'), () => openConfirm({
+        title: tr('riskAcknowledgeTitle'),
+        message: tr('riskAcknowledgeMessage'),
+        danger: true,
+        typed: true,
+        onConfirm: () => switchToRemoteDataset(modal.remote, modal.remoteFile, true),
+      }), { className: 'danger-button' }),
+      button(tr('cancel'), () => { ui.modal = null; scheduleRender(); }, { className: 'text-button' }),
+    ),
+  );
 }
 
 async function showDatasetMerge(remote, remoteFile = null) {
@@ -1240,48 +1413,86 @@ async function adoptEmptyCloudDataset() {
 }
 
 async function switchToEmptyDataset() {
-  const current = clone(currentState());
-  const safety = makeMigrationSnapshot(current, current.meta.schemaVersion, current.meta.schemaVersion);
   const empty = makeEmptyState();
-  empty.meta.accountId = current.settings.cloudSync?.accountId ?? null;
-  empty.settings.cloudSync = { ...(current.settings.cloudSync ?? {}), enabled: true, authorized: true, status: 'authorized', fileId: null };
-  empty.recoverySnapshots = [safety];
-  const result = await repository.replaceState(empty, 'switch_empty_dataset');
-  if (result.ok) { ui.modal = null; toast(tr('savedOffline')); }
+  await switchToRemoteDataset(empty, null);
 }
 
 async function loadDatasetChoice(choice) {
   try {
-    const remote = await driveSync.pull();
+    const remote = await driveSync.pull(null, null);
+    if (remote.status === 'dataset_choice') {
+      ui.modal = { kind: 'datasetChoice', title: tr('datasetChoice'), files: remote.files, reason: remote.reason, intent: choice };
+      scheduleRender();
+      return;
+    }
     if (remote.status === 'empty') {
       if (choice === 'merge') openConfirm({ title: tr('cloudFirstSync'), message: `${tr('cloudFirstSync')} · ${tr('itemCount')}: ${currentState().items.length} · ${tr('deletedCount')}: ${currentState().deleted.length}`, onConfirm: adoptEmptyCloudDataset });
-      else openConfirm({ title: tr('datasetSwitch'), message: tr('datasetRisk'), danger: true, typed: true, onConfirm: switchToEmptyDataset });
+      else requestDatasetSwitch(makeEmptyState(), null);
       return;
     }
     if (choice === 'merge') await showDatasetMerge(remote.state, remote.file);
-    else openConfirm({ title: tr('datasetSwitch'), message: tr('datasetRisk'), danger: true, typed: true, onConfirm: () => switchToRemoteDataset(remote.state, remote.file) });
+    else requestDatasetSwitch(remote.state, remote.file);
   } catch (error) {
     toast(tr('errorGeneric'), 'error');
     await repository.update('diagnostic_dataset_choice_error', (draft) => { recordError(draft, error, 'sync'); return { ok: true }; }, null, { queue: false });
   }
 }
 
-async function switchToRemoteDataset(remote, remoteFile = null) {
+async function switchToRemoteDataset(remote, remoteFile = null, riskAccepted = false) {
   const current = clone(currentState());
-  const safety = makeMigrationSnapshot(current, current.meta.schemaVersion, current.meta.schemaVersion);
   const incoming = clone(remote);
   incoming.meta.accountId = current.settings.cloudSync?.accountId ?? incoming.meta.accountId ?? null;
-  incoming.settings.cloudSync = { ...(incoming.settings.cloudSync ?? {}), ...(current.settings.cloudSync ?? {}), enabled: true, authorized: true, status: 'authorized', fileId: remoteFile?.id ?? incoming.settings.cloudSync?.fileId ?? null };
-  incoming.recoverySnapshots = [...(incoming.recoverySnapshots ?? []), safety];
-  const result = await repository.replaceState(incoming, 'switch_dataset');
-  if (result.ok) { ui.modal = null; toast(tr('savedOffline')); }
+  const fileId = remoteFile?.id ?? incoming.settings.cloudSync?.fileId ?? null;
+  incoming.settings.cloudSync = {
+    ...(incoming.settings.cloudSync ?? {}),
+    ...(current.settings.cloudSync ?? {}),
+    enabled: true,
+    authorized: true,
+    status: 'authorized',
+    fileId,
+    selectedDatasetId: incoming.meta.datasetId,
+    datasetFiles: { ...(current.settings.cloudSync?.datasetFiles ?? {}), ...(fileId ? { [incoming.meta.datasetId]: fileId } : {}) },
+  };
+  const prepared = prepareDatasetSwitch(current, incoming, { riskAccepted });
+  if (!prepared.ok) { requestDatasetSwitch(remote, remoteFile); return; }
+  const safety = await repository.createSafetySnapshot('dataset_switch');
+  if (!safety.ok) { toast(tr('errorGeneric'), 'error'); return; }
+  prepared.state.recoverySnapshots = [
+    ...(prepared.state.recoverySnapshots ?? []).filter((snapshot) => snapshot.id !== prepared.safety.id),
+    safety.snapshot,
+  ];
+  const result = await repository.replaceState(prepared.state, 'switch_dataset');
+  if (result.ok) { ui.modal = null; toast(tr('datasetSwitchSuccess')); }
 }
 
 async function pushCloud(state) {
+  const gate = canPushState(state);
+  if (!gate.ok) { toast(tr('syncPushBlocked'), 'error'); return { ok: false, reason: gate.reason }; }
   try {
     const pushed = await driveSync.push(state, state.settings.cloudSync?.fileId ?? null);
-    await mutate('sync_push', (draft) => { const base = clone(draft); delete base.meta.syncBaseState; draft.meta.syncBaseState = base; draft.meta.baseRevision = draft.meta.revision; draft.syncChanges = []; draft.settings.cloudSync = { ...(draft.settings.cloudSync ?? {}), fileId: pushed.file?.id ?? draft.settings.cloudSync?.fileId ?? null, lastSyncAt: isoNow() }; return { ok: true }; }, 'savedOffline', { queue: false });
-  } catch (error) { toast(tr('errorGeneric'), 'error'); await repository.update('diagnostic_sync_push_error', (draft) => { recordError(draft, error, 'sync'); return { ok: true }; }, null, { queue: false }); }
+    await mutate('sync_push', (draft) => {
+      const base = clone(draft);
+      delete base.meta.syncBaseState;
+      base.syncChanges = [];
+      draft.meta.syncBaseState = base;
+      draft.meta.baseRevision = draft.meta.revision;
+      draft.syncChanges = [];
+      const fileId = pushed.file?.id ?? draft.settings.cloudSync?.fileId ?? null;
+      draft.settings.cloudSync = {
+        ...(draft.settings.cloudSync ?? {}),
+        fileId,
+        selectedDatasetId: draft.meta.datasetId,
+        datasetFiles: { ...(draft.settings.cloudSync?.datasetFiles ?? {}), ...(fileId ? { [draft.meta.datasetId]: fileId } : {}) },
+        lastSyncAt: isoNow(),
+      };
+      return { ok: true };
+    }, 'savedOffline', { queue: false });
+    return { ok: true, pushed };
+  } catch (error) {
+    toast(error.code === 'unresolved_conflicts' ? tr('syncPushBlocked') : tr('errorGeneric'), 'error');
+    await repository.update('diagnostic_sync_push_error', (draft) => { recordError(draft, error, 'sync'); return { ok: true }; }, null, { queue: false });
+    return { ok: false, error };
+  }
 }
 
 async function applySyncMerge(merge, remoteFile = null, { automatic = false } = {}) {
@@ -1291,11 +1502,36 @@ async function applySyncMerge(merge, remoteFile = null, { automatic = false } = 
   const result = await repository.replaceState(state, 'sync_merge');
   if (!result.ok) return;
   try {
-    const fileId = remoteFile?.id ?? ui.modal?.remoteFile?.id ?? null;
-    await driveSync.push(state, fileId);
-    await repository.update('sync_merge_complete', (draft) => { const base = clone(draft); delete base.meta.syncBaseState; draft.meta.syncBaseState = base; draft.meta.baseRevision = draft.meta.revision; draft.settings.cloudSync = { ...(draft.settings.cloudSync ?? {}), fileId, lastSyncAt: isoNow() }; draft.syncChanges = []; return { ok: true }; }, null, { queue: false });
+    let fileId = remoteFile?.id ?? ui.modal?.remoteFile?.id ?? currentState().settings.cloudSync?.fileId ?? null;
+    let pushed = null;
+    if (!merge.conflicts.length) pushed = await driveSync.push(currentState(), fileId);
+    else if (merge.safeChanges) pushed = await driveSync.push(merge.cloudState, fileId);
+    fileId = pushed?.file?.id ?? fileId;
+    const blocked = new Set(merge.blockedEntities ?? []);
+    await repository.update('sync_merge_complete', (draft) => {
+      const base = clone(merge.conflicts.length ? merge.cloudState : draft);
+      delete base.meta.syncBaseState;
+      base.syncChanges = [];
+      base.conflicts = [];
+      draft.meta.syncBaseState = base;
+      draft.meta.baseRevision = base.meta.revision;
+      draft.settings.cloudSync = {
+        ...(draft.settings.cloudSync ?? {}),
+        fileId,
+        selectedDatasetId: draft.meta.datasetId,
+        datasetFiles: { ...(draft.settings.cloudSync?.datasetFiles ?? {}), ...(fileId ? { [draft.meta.datasetId]: fileId } : {}) },
+        lastSyncAt: pushed ? isoNow() : draft.settings.cloudSync?.lastSyncAt ?? null,
+      };
+      draft.syncChanges = merge.conflicts.length
+        ? draft.syncChanges.filter((change) => {
+          const entities = change.entityKeys?.length ? change.entityKeys : (change.itemIds ?? []).map((id) => `item:${id}`);
+          return !entities.length || entities.some((entity) => blocked.has(entity));
+        })
+        : [];
+      return { ok: true };
+    }, null, { queue: false });
     ui.modal = null;
-    if (!automatic) toast(merge.conflicts.length ? tr('syncConflict') : tr('savedOffline'), merge.conflicts.length ? 'info' : 'success');
+    if (!automatic) toast(merge.conflicts.length ? tr('conflictSafeApplied', { count: merge.conflicts.length }) : tr('savedOffline'), merge.conflicts.length ? 'info' : 'success');
   } catch (error) { toast(tr('errorGeneric'), 'error'); await repository.update('diagnostic_sync_merge_error', (draft) => { recordError(draft, error, 'sync'); return { ok: true }; }, null, { queue: false }); }
 }
 
@@ -1362,8 +1598,19 @@ async function deleteCloudDataset() {
   if (!fileId) { toast(tr('cloudSyncOff'), 'error'); return; }
   try {
     await driveSync.deleteDataset(fileId);
-    driveSync.logout();
-    await updateSetting('cloud_dataset_deleted', (settings) => { settings.cloudSync = { ...(settings.cloudSync ?? {}), enabled: false, authorized: false, status: settings.cloudSync?.clientId ? 'configured' : 'disabled', fileId: null, lastSyncAt: null }; }, 'savedOffline');
+    await updateSetting('cloud_dataset_deleted', (settings) => {
+      const datasetFiles = { ...(settings.cloudSync?.datasetFiles ?? {}) };
+      delete datasetFiles[currentState().meta.datasetId];
+      settings.cloudSync = {
+        ...(settings.cloudSync ?? {}),
+        enabled: false,
+        status: settings.cloudSync?.authorized ? 'paused' : settings.cloudSync?.clientId ? 'configured' : 'disabled',
+        fileId: null,
+        selectedDatasetId: null,
+        datasetFiles,
+        lastSyncAt: null,
+      };
+    }, 'savedOffline');
     ui.modal = null;
   } catch (error) {
     toast(tr('errorGeneric'), 'error');
@@ -1419,10 +1666,10 @@ function renderSnapshotRestoreModal(content, modal) {
 }
 
 async function confirmSnapshotRestore(restoredState) {
-  const current = clone(currentState());
-  const safety = makeMigrationSnapshot(current, current.meta.schemaVersion, current.meta.schemaVersion);
+  const safety = await repository.createSafetySnapshot('manual_migration_restore');
+  if (!safety.ok) { toast(tr('errorGeneric'), 'error'); return; }
   const restored = clone(restoredState);
-  restored.recoverySnapshots = [...(restored.recoverySnapshots ?? []), safety];
+  restored.recoverySnapshots = [...(restored.recoverySnapshots ?? []), safety.snapshot];
   const result = await repository.replaceState(restored, 'restore_migration_snapshot');
   if (result.ok) { ui.modal = null; toast(tr('restoreSuccess')); }
   else toast(tr('errorGeneric'), 'error');
@@ -1436,17 +1683,112 @@ function renderIconGuide() {
   return settingCard(tr('iconGuideTitle'), ...entries.map(([glyph, key]) => node('div', { class: 'icon-guide-row' }, node('span', { class: 'icon-guide-symbol' }, glyph), node('span', {}, tr(key)))));
 }
 
-function renderDeveloperSettings(state) {
+function renderDeveloperSettingsLegacy(state) {
   const report = diagnosticReport(state);
   const health = dataHealth(state);
   return node('div', { class: 'settings-stack' }, settingCard(tr('settingsDeveloper'), node('p', { class: 'field-hint' }, tr('developerInfo')), settingsToggle(tr('developerEnabled'), state.settings.developerEnabled === true, (event) => updateSetting('developer_enabled_changed', (settings) => { settings.developerEnabled = event.target.checked; }, 'savedOffline')), node('div', { class: 'button-grid' }, button(tr('exportDiagnostics'), () => { downloadText(`progress-tracker-diagnostics-${dateKey(new Date())}.json`, JSON.stringify(diagnosticReport(currentState()), null, 2), 'application/json'); mutate('diagnostic_export', (draft) => { recordSemantic(draft, 'export', { scope: 'diagnostics' }); return { ok: true }; }, null, { queue: false }); }, { className: 'secondary-button' }), button(tr('clearDiagnostics'), () => mutate('clear_diagnostics', (draft) => { clearDiagnostics(draft); return { ok: true }; }, 'savedOffline', { queue: false }), { className: 'danger-button' }))), settingCard(tr('developerDiagnostics'), metricGrid([[tr('historyCount'), report.semanticEventMetadata.eventCount], [tr('developerDiagnostics'), report.errors.length], [tr('performance'), report.performance.length]]), node('p', { class: 'field-hint' }, tr('diagnosticsNoContent'))), settingCard(tr('developerHealth'), node('div', { class: health.ok ? 'health-ok' : 'health-error' }, health.ok ? '✓' : `${health.errors.length}`, health.ok ? tr('savedOffline') : tr('errorGeneric')), node('pre', { class: 'diagnostic-pre' }, JSON.stringify(health, null, 2))));
+}
+
+function localizedHealthLabel(type) {
+  return tr({
+    duplicate_category_id: 'healthDuplicate',
+    duplicate_id: 'healthDuplicate',
+    invalid_category: 'healthInvalidCategory',
+    orphan_item: 'healthOrphan',
+    orphan_reminder: 'healthOrphan',
+    reminder_inconsistency: 'healthOrphan',
+    cross_category_parent: 'healthCrossCategory',
+    hierarchy_cycle: 'healthCycle',
+    invalid_date: 'healthInvalidDate',
+    invalid_reminder_date: 'healthInvalidDate',
+    reminder_without_due: 'healthReminder',
+    reminder_calculation_exception: 'healthReminder',
+  }[type] ?? 'healthOther');
+}
+
+function renderDeveloperSettings(state) {
+  const report = diagnosticReport(state);
+  const health = dataHealth(state);
+  const controls = settingCard(
+    tr('settingsDeveloper'),
+    node('p', { class: 'field-hint' }, tr('developerInfo')),
+    settingsToggle(tr('developerEnabled'), state.settings.developerEnabled === true, (event) => updateSetting('developer_enabled_changed', (settings) => { settings.developerEnabled = event.target.checked; }, 'savedOffline')),
+    node('div', { class: 'button-grid' },
+      button(tr('exportDiagnostics'), () => {
+        downloadText(`progress-tracker-diagnostics-${dateKey(new Date())}.json`, JSON.stringify(diagnosticReport(currentState()), null, 2), 'application/json');
+        mutate('diagnostic_export', (draft) => { recordSemantic(draft, 'export', { scope: 'diagnostics' }); return { ok: true }; }, null, { queue: false });
+      }, { className: 'secondary-button' }),
+      button(tr('clearDiagnostics'), () => mutate('clear_diagnostics', (draft) => { clearDiagnostics(draft); return { ok: true }; }, 'savedOffline', { queue: false }), { className: 'danger-button' }),
+    ),
+  );
+  const diagnostics = settingCard(
+    tr('developerDiagnostics'),
+    metricGrid([
+      [tr('historyCount'), report.semanticEventMetadata.eventCount],
+      [tr('developerDiagnostics'), report.errors.length],
+      [tr('performance'), report.performance.length],
+    ]),
+    node('p', { class: 'field-hint' }, tr('diagnosticsNoContent')),
+  );
+  const issues = health.ok
+    ? node('p', { class: 'field-hint' }, tr('healthNoIssues'))
+    : node('ul', { class: 'health-issues' }, ...health.errors.map((issue) => node('li', {}, localizedHealthLabel(issue.type))));
+  const healthCard = settingCard(
+    tr('developerHealth'),
+    node('div', { class: health.ok ? 'health-ok' : 'health-error' }, health.ok ? '✓' : String(health.errors.length), health.ok ? tr('healthNoIssues') : tr('errorGeneric')),
+    metricGrid([
+      [tr('healthCategories'), health.counts.categories],
+      [tr('healthItems'), health.counts.items],
+      [tr('healthReminders'), health.counts.reminders],
+      [tr('healthCheckedAt'), formatDateTime(language(), health.checkedAt)],
+    ]),
+    issues,
+  );
+  return node('div', { class: 'settings-stack' }, controls, diagnostics, healthCard);
 }
 
 function renderAboutSettings() { return node('div', { class: 'settings-stack' }, settingCard(tr('settingsAbout'), node('p', {}, tr('aboutText')), node('p', {}, tr('aboutScope')), node('p', { class: 'field-hint' }, tr('capabilityNoPush')))); }
 
 function renderRecoveryMode(state) {
   const error = repository?.lastError;
-  return node('section', { class: 'recovery-mode page' }, node('div', { class: 'recovery-icon' }, '⚠'), heading(tr('dataRecoveryMode'), 1), node('p', {}, tr('recoveryReadOnly')), node('p', { class: 'field-hint' }, error ? tr('errorRecovery') : ''), node('div', { class: 'button-grid' }, button(tr('exportSnapshot'), () => downloadText(`progress-tracker-recovery-${dateKey(new Date())}.json`, JSON.stringify(state, null, 2), 'application/json'), { className: 'primary-button' }), button(tr('retryRecovery'), () => window.location.reload(), { className: 'secondary-button' })));
+  const context = state.meta.recoveryContext ?? {};
+  const retry = async () => {
+    const result = await repository.retryRecovery();
+    toast(tr(result.ok ? 'recoveryRetrySuccess' : 'recoveryRetryFailed'), result.ok ? 'success' : 'error');
+    if (result.ok) ui.page = currentState().settings.defaultPage ?? 'categories';
+    scheduleRender();
+  };
+  return node('section', { class: 'recovery-mode page' },
+    node('div', { class: 'recovery-icon' }, '⚠'),
+    heading(tr('dataRecoveryMode'), 1),
+    node('p', {}, tr('recoveryReadOnly')),
+    node('p', { class: 'field-hint' }, tr('recoveryExportActual')),
+    metricGrid([
+      [tr('recoverySourceVersion'), context.sourceSchemaVersion ?? tr('notAvailable')],
+      [tr('recoveryTargetVersion'), context.targetSchemaVersion ?? tr('notAvailable')],
+      [tr('recoveryEnteredAt'), context.enteredAt ? formatDateTime(language(), context.enteredAt) : tr('notAvailable')],
+    ]),
+    error ? node('p', { class: 'warning-note' }, tr('errorRecovery')) : null,
+    node('div', { class: 'button-grid' },
+      button(tr('exportSnapshot'), () => downloadText(`progress-tracker-recovery-${dateKey(new Date())}.json`, JSON.stringify(repository.recoveryExport(), null, 2), 'application/json'), { className: 'primary-button' }),
+      button(tr('recoveryDiagnostics'), () => {
+        ui.modal = {
+          kind: 'info',
+          title: tr('recoveryDiagnostics'),
+          body: node('div', { class: 'settings-stack' },
+            node('p', { class: 'warning-note' }, tr('errorRecovery')),
+            metricGrid([
+              [tr('recoverySourceVersion'), context.sourceSchemaVersion ?? tr('notAvailable')],
+              [tr('recoveryTargetVersion'), context.targetSchemaVersion ?? tr('notAvailable')],
+              [tr('recoveryEnteredAt'), context.enteredAt ? formatDateTime(language(), context.enteredAt) : tr('notAvailable')],
+            ]),
+          ),
+        };
+        scheduleRender();
+      }, { className: 'secondary-button' }),
+      button(tr('retryRecovery'), retry, { className: 'secondary-button' }),
+    ),
+  );
 }
 
 function renderModal(state) {
@@ -1464,6 +1806,8 @@ function renderModal(state) {
   else if (modal.kind === 'snapshotRestore') renderSnapshotRestoreModal(content, modal);
   else if (modal.kind === 'sync') renderSyncModal(content, modal);
   else if (modal.kind === 'dataset') renderDatasetModal(content, modal);
+  else if (modal.kind === 'datasetChoice') renderDatasetChoiceModal(content, modal);
+  else if (modal.kind === 'backupGate') renderBackupGateModal(content, modal);
   else if (modal.kind === 'customSnooze') renderCustomSnoozeModal(content, modal);
   backdrop.append(box); return backdrop;
 }
@@ -1548,10 +1892,10 @@ function renderRestoreModal(content, preview) {
 }
 
 async function confirmFullRestore(preview) {
-  const current = clone(currentState());
-  const safety = makeMigrationSnapshot(current, current.meta.schemaVersion, current.meta.schemaVersion);
+  const safety = await repository.createSafetySnapshot('full_restore');
+  if (!safety.ok) { toast(tr('errorGeneric'), 'error'); return; }
   const incoming = clone(preview.incoming);
-  incoming.recoverySnapshots = [...(incoming.recoverySnapshots ?? []), safety];
+  incoming.recoverySnapshots = [...(incoming.recoverySnapshots ?? []), safety.snapshot];
   const result = await repository.replaceState(incoming, 'full_restore');
   if (result.ok) { ui.modal = null; ui.restorePreview = null; toast(tr('restoreSuccess')); }
   else toast(tr('errorGeneric'), 'error');
@@ -1560,6 +1904,11 @@ async function confirmFullRestore(preview) {
 function renderSyncModal(content, modal) {
   const merge = modal.merge;
   content.append(node('p', {}, merge.conflicts.length ? tr('syncConflict') : tr('savedOffline')), metricGrid([[tr('itemCount'), merge.state.items.length], [tr('syncConflict'), merge.conflicts.length], [tr('historyCount'), merge.state.history.length]]));
-  if (merge.conflicts.length) content.append(node('p', { class: 'warning-note' }, tr('conflictArchive')));
-  content.append(node('div', { class: 'modal-actions' }, button(tr('cancel'), () => { ui.modal = null; scheduleRender(); }, { className: 'text-button' }), button(tr('confirm'), () => applySyncMerge(merge), { className: 'primary-button' })));
+  if (merge.conflicts.length) {
+    content.append(node('p', { class: 'warning-note' }, tr('conflictBlocked', { count: merge.conflicts.length })), node('p', { class: 'field-hint' }, tr('conflictChoiceRequired')));
+    const preview = node('div', { class: 'conflict-list sync-conflict-preview' });
+    for (const conflict of merge.conflicts) preview.append(renderConflictComparison(conflict, false));
+    content.append(preview);
+  }
+  content.append(node('div', { class: 'modal-actions' }, button(tr('cancel'), () => { ui.modal = null; scheduleRender(); }, { className: 'text-button' }), button(merge.conflicts.length ? tr('applySafeSync') : tr('confirm'), () => applySyncMerge(merge, modal.remoteFile), { className: 'primary-button' })));
 }

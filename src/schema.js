@@ -1,5 +1,7 @@
+import { normalizeThemePreference } from './appearance.js';
+
 export const APP_VERSION = '1.0.0';
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 export const DAY_MS = 24 * 60 * 60 * 1000;
 
 export function newId(prefix = 'id') {
@@ -42,7 +44,20 @@ export function emptySettings() {
       reminderLearning: true,
     },
     defaultReminderTime: '09:00',
-    cloudSync: { enabled: false, clientId: '', authorized: false, status: 'disabled', accountId: null, fileId: null, backupFolderId: null, visibleBackups: [], lastSyncAt: null },
+    cloudSync: {
+      enabled: false,
+      clientId: '',
+      authorized: false,
+      status: 'disabled',
+      accountId: null,
+      fileId: null,
+      selectedDatasetId: null,
+      datasetFiles: {},
+      availableDatasets: [],
+      backupFolderId: null,
+      visibleBackups: [],
+      lastSyncAt: null,
+    },
     focusByCategory: {},
     expandedByCategory: {},
     smartOrders: {},
@@ -55,6 +70,9 @@ export function makeCategory(title, order = 0, now = isoNow()) {
     id: newId('cat'),
     title,
     order,
+    revision: 0,
+    baseRevision: 0,
+    fieldRevisions: {},
     createdAt: now,
     updatedAt: now,
   };
@@ -105,6 +123,7 @@ export function makeEmptyState(now = isoNow()) {
       updatedAt: now,
       lastRolloverDate: dateKey(now),
       recoveryMode: false,
+      recoveryContext: null,
       lastSession: { startedAt: now, endedAt: now, normal: true },
     },
     categories: [category],
@@ -131,7 +150,8 @@ export function normalizeState(input, now = isoNow()) {
   const state = clone(input ?? makeEmptyState(now));
   const fallback = makeEmptyState(now);
   state.meta = { ...fallback.meta, ...(state.meta ?? {}) };
-  state.meta.schemaVersion = SCHEMA_VERSION;
+  const sourceSchemaVersion = Number(state.meta.schemaVersion);
+  state.meta.schemaVersion = Number.isFinite(sourceSchemaVersion) ? sourceSchemaVersion : SCHEMA_VERSION;
   state.meta.appVersion = APP_VERSION;
   state.categories = Array.isArray(state.categories) ? state.categories : [];
   state.items = Array.isArray(state.items) ? state.items : [];
@@ -149,6 +169,9 @@ export function normalizeState(input, now = isoNow()) {
     firstHints: { ...(state.settings?.firstHints ?? {}) },
   };
   state.settings.cloudSync.visibleBackups = Array.isArray(state.settings.cloudSync.visibleBackups) ? state.settings.cloudSync.visibleBackups : [];
+  state.settings.cloudSync.availableDatasets = Array.isArray(state.settings.cloudSync.availableDatasets) ? state.settings.cloudSync.availableDatasets : [];
+  state.settings.cloudSync.datasetFiles = { ...(state.settings.cloudSync.datasetFiles ?? {}) };
+  state.settings.theme = normalizeThemePreference(state.settings.theme);
   state.smartOrders = { ...(state.smartOrders ?? {}) };
   state.syncChanges = Array.isArray(state.syncChanges) ? state.syncChanges : [];
   state.conflicts = Array.isArray(state.conflicts) ? state.conflicts : [];
@@ -168,6 +191,7 @@ export function normalizeState(input, now = isoNow()) {
   }
   state.categories = state.categories.map((category, index) => ({
     id: category.id ?? newId('cat'), title: String(category.title ?? ''), order: Number(category.order ?? index),
+    revision: Number(category.revision ?? 0), baseRevision: Number(category.baseRevision ?? 0), fieldRevisions: { ...(category.fieldRevisions ?? {}) },
     createdAt: category.createdAt ?? now, updatedAt: category.updatedAt ?? now,
   }));
   state.items = state.items.map((item, index) => ({
@@ -188,8 +212,21 @@ export function normalizeState(input, now = isoNow()) {
     enabled: reminder.enabled !== false, keepAfterComplete: reminder.keepAfterComplete === true,
     suspendedByCompletion: reminder.suspendedByCompletion === true,
     snoozedUntil: reminder.snoozedUntil ?? null, suppressedDay: reminder.suppressedDay ?? null,
-    lastTriggeredAt: reminder.lastTriggeredAt ?? null, createdAt: reminder.createdAt ?? now, updatedAt: reminder.updatedAt ?? now,
+    lastTriggeredAt: reminder.lastTriggeredAt ?? null,
+    revision: Number(reminder.revision ?? 0), baseRevision: Number(reminder.baseRevision ?? 0), fieldRevisions: { ...(reminder.fieldRevisions ?? {}) },
+    createdAt: reminder.createdAt ?? now, updatedAt: reminder.updatedAt ?? now,
   }));
+  state.today.items = Object.fromEntries(Object.entries(state.today.items ?? {}).map(([itemId, membership]) => [itemId, {
+    itemId,
+    order: Number(membership?.order ?? 0),
+    addedAt: membership?.addedAt ?? now,
+    source: membership?.source === 'planned' ? 'planned' : 'manual',
+    completedAt: membership?.completedAt ?? null,
+    revision: Number(membership?.revision ?? 0),
+    baseRevision: Number(membership?.baseRevision ?? 0),
+    fieldRevisions: { ...(membership?.fieldRevisions ?? {}) },
+  }]));
+  state.conflicts = state.conflicts.map((conflict) => ({ status: 'pending', blockedPush: true, ...conflict }));
   return state;
 }
 

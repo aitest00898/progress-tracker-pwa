@@ -3,6 +3,8 @@ import { makeEmptyState, normalizeState } from './schema.js';
 export const DB_NAME = 'progress-tracker-local';
 export const DB_VERSION = 1;
 export const STORE_NAMES = ['meta', 'categories', 'items', 'history', 'reminders', 'today', 'settings', 'smartOrders', 'syncChanges', 'conflicts', 'conflictArchive', 'deleted', 'backupMeta', 'migrationSnapshots', 'recoverySnapshots', 'diagnostics', 'performance', 'capabilities'];
+export const SINGLETON_STORES = ['meta', 'today', 'settings', 'smartOrders', 'diagnostics', 'capabilities'];
+export const ARRAY_STORES = ['categories', 'items', 'history', 'reminders', 'syncChanges', 'conflicts', 'conflictArchive', 'deleted', 'backupMeta', 'migrationSnapshots', 'recoverySnapshots', 'performance'];
 
 export class StorageError extends Error {
   constructor(message, cause) { super(message); this.name = 'StorageError'; this.cause = cause; }
@@ -23,6 +25,49 @@ export function openDatabase(name = DB_NAME) {
 }
 
 function oneRecord(key, value) { return { key, value }; }
+
+function recordKey(store, value, index) {
+  return value?.id ?? value?.key ?? `${store}_${index}`;
+}
+
+function recordMaps(inputState) {
+  const state = normalizeState(inputState);
+  const maps = Object.fromEntries(STORE_NAMES.map((store) => [store, new Map()]));
+  for (const store of SINGLETON_STORES) maps[store].set('root', oneRecord('root', state[store]));
+  for (const store of ARRAY_STORES) {
+    (state[store] ?? []).forEach((value, index) => {
+      const key = recordKey(store, value, index);
+      maps[store].set(key, oneRecord(key, value));
+    });
+  }
+  return maps;
+}
+
+function sameRecord(left, right) {
+  return JSON.stringify(left?.value) === JSON.stringify(right?.value);
+}
+
+export function planStateChanges(beforeState, afterState) {
+  const before = recordMaps(beforeState);
+  const after = recordMaps(afterState);
+  const stores = {};
+  let putCount = 0;
+  let deleteCount = 0;
+  for (const store of STORE_NAMES) {
+    const puts = [];
+    const deletes = [];
+    for (const [key, record] of after[store]) {
+      if (!sameRecord(before[store].get(key), record)) puts.push(record);
+    }
+    for (const key of before[store].keys()) if (!after[store].has(key)) deletes.push(key);
+    if (puts.length || deletes.length) {
+      stores[store] = { puts, deletes };
+      putCount += puts.length;
+      deleteCount += deletes.length;
+    }
+  }
+  return { stores, putCount, deleteCount, operationCount: putCount + deleteCount };
+}
 
 export function loadState(db) {
   return new Promise((resolve, reject) => {
@@ -74,14 +119,40 @@ export function saveState(db, inputState) {
     tx.objectStore('smartOrders').put(oneRecord('root', state.smartOrders));
     tx.objectStore('diagnostics').put(oneRecord('root', state.diagnostics));
     tx.objectStore('capabilities').put(oneRecord('root', state.capabilities));
-    const arrays = ['categories', 'items', 'history', 'reminders', 'syncChanges', 'conflicts', 'conflictArchive', 'deleted', 'backupMeta', 'migrationSnapshots', 'recoverySnapshots', 'performance'];
-    for (const store of arrays) for (const value of state[store] ?? []) {
-      const id = value.id ?? `${store}_${Math.random().toString(36).slice(2)}`;
+    for (const store of ARRAY_STORES) for (const [index, value] of (state[store] ?? []).entries()) {
+      const id = recordKey(store, value, index);
       tx.objectStore(store).put(oneRecord(id, value));
     }
     tx.oncomplete = () => resolve(true);
     tx.onerror = () => reject(new StorageError('IndexedDB state write failed', tx.error));
     tx.onabort = () => reject(new StorageError('IndexedDB state write aborted', tx.error));
+  });
+}
+
+export function saveStateChanges(db, beforeState, afterState) {
+  const plan = planStateChanges(beforeState, afterState);
+  const stores = Object.keys(plan.stores);
+  if (!stores.length) return Promise.resolve(plan);
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(stores, 'readwrite');
+    for (const [store, operations] of Object.entries(plan.stores)) {
+      const objectStore = tx.objectStore(store);
+      for (const key of operations.deletes) objectStore.delete(key);
+      for (const record of operations.puts) objectStore.put(record);
+    }
+    tx.oncomplete = () => resolve(plan);
+    tx.onerror = () => reject(new StorageError('IndexedDB incremental write failed', tx.error));
+    tx.onabort = () => reject(new StorageError('IndexedDB incremental write aborted', tx.error));
+  });
+}
+
+export function saveMigrationSnapshot(db, snapshot) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(['migrationSnapshots'], 'readwrite');
+    tx.objectStore('migrationSnapshots').put(oneRecord(snapshot.id, snapshot));
+    tx.oncomplete = () => resolve(snapshot);
+    tx.onerror = () => reject(new StorageError('Migration safety snapshot write failed', tx.error));
+    tx.onabort = () => reject(new StorageError('Migration safety snapshot write aborted', tx.error));
   });
 }
 

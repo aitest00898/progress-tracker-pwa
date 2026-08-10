@@ -1,8 +1,8 @@
 {
-  "name": "進度追蹤器",
-  "short_name": "進度追蹤器",
-  "description": "本機優先、離線可用，支援無限階層的通用進度追蹤器",
-  "lang": "zh-Hant-TW",
+  "name": "Progress Tracker",
+  "short_name": "Progress",
+  "description": "A local-first, offline-ready progress tracker with unlimited hierarchy",
+  "lang": "en",
   "id": "./",
   "start_url": ".",
   "scope": "./",

@@ -1,4 +1,4 @@
-import { clone, dateKey, DAY_MS, isoNow, makeItem, newId } from './schema.js';
+import { clone, dateKey, DAY_MS, isoNow, makeCategory, makeItem, newId } from './schema.js';
 import { createEngineIndex } from './engine-index.js';
 
 export { createEngineIndex } from './engine-index.js';
@@ -110,16 +110,25 @@ export function touchItem(state, item, changedFields = [], at = isoNow()) {
   state.meta.updatedAt = at;
 }
 
+function touchCanonicalEntity(state, entity, changedFields = [], at = isoNow()) {
+  entity.revision = Number(entity.revision ?? 0) + 1;
+  entity.updatedAt = at;
+  entity.fieldRevisions = { ...(entity.fieldRevisions ?? {}) };
+  for (const field of changedFields) entity.fieldRevisions[field] = entity.revision;
+  state.meta.revision = Number(state.meta.revision ?? 0) + 1;
+  state.meta.updatedAt = at;
+}
+
 export function createCategory(state, title, at = isoNow(), adjacentToCategoryId = null) {
   const cleanTitle = String(title ?? '').trim();
   if (!cleanTitle) return { ok: false, reason: 'required' };
-  const category = { id: newId('cat'), title: cleanTitle, order: state.categories.length, createdAt: at, updatedAt: at };
+  const category = makeCategory(cleanTitle, state.categories.length, at);
   state.categories.push(category);
   if (adjacentToCategoryId && getCategory(state, adjacentToCategoryId)) {
     const ordered = [...state.categories].sort((a, b) => a.order - b.order).filter((candidate) => candidate.id !== category.id);
     const index = ordered.findIndex((candidate) => candidate.id === adjacentToCategoryId);
     ordered.splice(index < 0 ? ordered.length : index + 1, 0, category);
-    ordered.forEach((candidate, order) => { candidate.order = order; candidate.updatedAt = at; });
+    ordered.forEach((candidate, order) => { candidate.order = order; touchCanonicalEntity(state, candidate, ['order'], at); });
   }
   if (!state.settings.defaultCategoryId) state.settings.defaultCategoryId = category.id;
   state.meta.updatedAt = at;
@@ -131,8 +140,7 @@ export function renameCategory(state, categoryId, title, at = isoNow()) {
   const cleanTitle = String(title ?? '').trim();
   if (!category || !cleanTitle) return { ok: false, reason: 'required' };
   category.title = cleanTitle;
-  category.updatedAt = at;
-  state.meta.updatedAt = at;
+  touchCanonicalEntity(state, category, ['title'], at);
   return { ok: true, category };
 }
 
@@ -143,9 +151,8 @@ export function reorderCategories(state, categoryId, beforeCategoryId, at = isoN
   const [moved] = ordered.splice(index, 1);
   const target = beforeCategoryId ? ordered.findIndex((category) => category.id === beforeCategoryId) : ordered.length;
   ordered.splice(target < 0 ? ordered.length : target, 0, moved);
-  ordered.forEach((category, order) => { category.order = order; category.updatedAt = at; });
+  ordered.forEach((category, order) => { category.order = order; touchCanonicalEntity(state, category, ['order'], at); });
   state.categories = ordered;
-  state.meta.updatedAt = at;
   return { ok: true };
 }
 
@@ -251,7 +258,11 @@ export function setItemStatus(state, itemId, status, { force = false, at = isoNo
     item.completedAt = at;
     item.reopenedAt = null;
     for (const reminder of state.reminders.filter((candidate) => candidate.itemId === itemId)) {
-      if (!reminder.keepAfterComplete && !reminder.suspendedByCompletion) { reminder.suspendedByCompletion = true; reminder.updatedAt = at; remindersChanged = true; }
+      if (!reminder.keepAfterComplete && !reminder.suspendedByCompletion) {
+        reminder.suspendedByCompletion = true;
+        touchCanonicalEntity(state, reminder, ['suspendedByCompletion'], at);
+        remindersChanged = true;
+      }
     }
     recordHistory(state, itemId, 'completed', {}, at);
   } else if (previous === 'completed' && status === 'active') {
@@ -261,10 +272,10 @@ export function setItemStatus(state, itemId, status, { force = false, at = isoNo
       if (reminder.suspendedByCompletion) {
         const occurrence = reminderOccurrence(state, reminder, at);
         reminder.suspendedByCompletion = false;
-        reminder.updatedAt = at;
         remindersChanged = true;
         if (occurrence && occurrence.getTime() > new Date(at).getTime()) reminder.enabled = true;
         else if (occurrence) reminder.lastTriggeredAt = occurrence.toISOString();
+        touchCanonicalEntity(state, reminder, ['suspendedByCompletion', 'enabled', 'lastTriggeredAt'], at);
       }
     }
     recordHistory(state, itemId, 'reopened', {}, at);
@@ -473,9 +484,10 @@ export function addReminder(state, itemId, input, at = isoNow()) {
     id: newId('rem'), itemId, type, offsetDays: type === 'relative' ? Number(input.offsetDays ?? -1) : 0,
     time: input.time ?? '09:00', at: type === 'absolute' ? (input.at ?? null) : null, enabled: input.enabled !== false,
     keepAfterComplete: input.keepAfterComplete === true, suspendedByCompletion: false, snoozedUntil: null,
-    suppressedDay: null, lastTriggeredAt: null, createdAt: at, updatedAt: at,
+    suppressedDay: null, lastTriggeredAt: null, revision: 0, baseRevision: 0, fieldRevisions: {}, createdAt: at, updatedAt: at,
   };
   state.reminders.push(reminder);
+  touchCanonicalEntity(state, reminder, ['itemId', 'type', 'offsetDays', 'time', 'at', 'enabled', 'keepAfterComplete'], at);
   touchItem(state, item, ['reminders'], at);
   recordHistory(state, itemId, 'reminder_changed', { action: 'added', reminderId: reminder.id }, at);
   return { ok: true, reminder };
@@ -488,7 +500,8 @@ export function updateReminder(state, reminderId, patch, at = isoNow()) {
   const nextType = patch.type === undefined ? reminder.type : patch.type;
   if (!['absolute', 'relative'].includes(nextType)) return { ok: false, reason: 'invalid' };
   if (nextType === 'relative' && !effectiveDue(state, reminder.itemId).value) return { ok: false, reason: 'no_due' };
-  Object.assign(reminder, patch, { type: nextType, updatedAt: at });
+  Object.assign(reminder, patch, { type: nextType });
+  touchCanonicalEntity(state, reminder, [...new Set([...Object.keys(patch), 'type'])], at);
   if (item) { touchItem(state, item, ['reminders'], at); recordHistory(state, item.id, 'reminder_changed', { reminderId }, at); }
   return { ok: true, reminder };
 }
@@ -560,7 +573,7 @@ export function snoozeReminder(state, reminderId, until, at = isoNow()) {
   if (!reminder) return { ok: false, reason: 'missing' };
   reminder.snoozedUntil = new Date(until).toISOString();
   reminder.lastTriggeredAt = reminderOccurrence(state, reminder, new Date(at))?.toISOString() ?? reminder.lastTriggeredAt;
-  reminder.updatedAt = at;
+  touchCanonicalEntity(state, reminder, ['snoozedUntil', 'lastTriggeredAt'], at);
   const item = getItem(state, reminder.itemId);
   if (item) { touchItem(state, item, ['reminders'], at); recordHistory(state, item.id, 'reminder_changed', { action: 'snoozed', reminderId }, at); }
   return { ok: true };
@@ -571,7 +584,7 @@ export function suppressReminderToday(state, reminderId, at = new Date()) {
   if (!reminder) return { ok: false, reason: 'missing' };
   reminder.suppressedDay = dateKey(at);
   const updatedAt = new Date(at).toISOString();
-  reminder.updatedAt = updatedAt;
+  touchCanonicalEntity(state, reminder, ['suppressedDay'], updatedAt);
   const item = getItem(state, reminder.itemId);
   if (item) { touchItem(state, item, ['reminders'], updatedAt); recordHistory(state, item.id, 'reminder_changed', { action: 'suppressed_today', reminderId }, updatedAt); }
   return { ok: true };
@@ -583,8 +596,10 @@ export function addToToday(state, itemId, source = 'manual', at = isoNow()) {
   const existing = state.today.items[itemId];
   if (existing) return { ok: true, changed: false, entry: existing };
   const order = Object.values(state.today.items).reduce((max, entry) => Math.max(max, entry.order ?? -1), -1) + 1;
-  const entry = { itemId, order, addedAt: at, source, completedAt: null };
+  const entry = { itemId, order, addedAt: at, source, completedAt: null, revision: 1, baseRevision: 0, fieldRevisions: { order: 1, source: 1 } };
   state.today.items[itemId] = entry;
+  state.meta.revision = Number(state.meta.revision ?? 0) + 1;
+  state.meta.updatedAt = at;
   recordHistory(state, itemId, 'today_added', { source }, at);
   return { ok: true, changed: true, entry };
 }
@@ -592,6 +607,8 @@ export function addToToday(state, itemId, source = 'manual', at = isoNow()) {
 export function removeFromToday(state, itemId, at = isoNow()) {
   if (!state.today.items[itemId]) return { ok: true, changed: false };
   delete state.today.items[itemId];
+  state.meta.revision = Number(state.meta.revision ?? 0) + 1;
+  state.meta.updatedAt = at;
   recordHistory(state, itemId, 'today_removed', {}, at);
   return { ok: true, changed: true };
 }
@@ -614,6 +631,9 @@ export function markTodayCompletion(state, itemId, status, at = isoNow()) {
   const entry = state.today.items[itemId];
   if (!entry) return;
   entry.completedAt = status === 'completed' ? at : null;
+  entry.revision = Number(entry.revision ?? 0) + 1;
+  entry.fieldRevisions = { ...(entry.fieldRevisions ?? {}), completedAt: entry.revision };
+  state.meta.updatedAt = at;
 }
 
 export function derivedTodayItems(state, now = new Date(), index = null) {
@@ -802,7 +822,7 @@ export function softDeleteItem(state, itemId, at = isoNow()) {
   if (!item) return { ok: false, reason: 'missing' };
   const ids = [item, ...descendantsOf(state, itemId)].map((candidate) => candidate.id);
   const snapshot = createDeletedSnapshot(state, ids);
-  state.deleted.push({ id: newId('del'), kind: 'item_tree', rootId: itemId, categoryId: item.categoryId, parentId: item.parentId, deletedAt: at, purgeAfter: new Date(new Date(at).getTime() + 30 * DAY_MS).toISOString(), snapshot });
+  state.deleted.push({ id: newId('del'), kind: 'item_tree', rootId: itemId, categoryId: item.categoryId, parentId: item.parentId, deletedAt: at, purgeAfter: new Date(new Date(at).getTime() + 30 * DAY_MS).toISOString(), revision: 1, baseRevision: 0, fieldRevisions: {}, snapshot });
   state.items = state.items.filter((candidate) => !ids.includes(candidate.id));
   state.history = state.history.filter((entry) => !ids.includes(entry.itemId));
   state.reminders = state.reminders.filter((reminder) => !ids.includes(reminder.itemId));
@@ -815,7 +835,7 @@ export function softDeleteCategory(state, categoryId, at = isoNow()) {
   if (!category) return { ok: false, reason: 'missing' };
   const ids = state.items.filter((item) => item.categoryId === categoryId).map((item) => item.id);
   const snapshot = { category: clone(category), ...createDeletedSnapshot(state, ids) };
-  state.deleted.push({ id: newId('del'), kind: 'category_tree', rootId: categoryId, categoryId, parentId: null, deletedAt: at, purgeAfter: new Date(new Date(at).getTime() + 30 * DAY_MS).toISOString(), snapshot });
+  state.deleted.push({ id: newId('del'), kind: 'category_tree', rootId: categoryId, categoryId, parentId: null, deletedAt: at, purgeAfter: new Date(new Date(at).getTime() + 30 * DAY_MS).toISOString(), revision: 1, baseRevision: 0, fieldRevisions: {}, snapshot });
   state.categories = state.categories.filter((candidate) => candidate.id !== categoryId);
   state.items = state.items.filter((item) => item.categoryId !== categoryId);
   state.history = state.history.filter((entry) => !ids.includes(entry.itemId));
@@ -908,14 +928,7 @@ export function duplicateSubtree(state, itemId, { categoryId, parentId = null, t
   return { ok: true, root: copies[0], copies, idMap };
 }
 
-export function storageBreakdown(state) {
-  const bytes = (value) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
-  const breakdown = {
-    items: bytes(state.items), notes: bytes(state.items.map((item) => item.notes)), history: bytes(state.history), reminders: bytes(state.reminders),
-    deleted: bytes(state.deleted), sync: bytes({ syncChanges: state.syncChanges, conflicts: state.conflicts }), conflicts: bytes(state.conflictArchive),
-  };
-  return { breakdown, total: Object.values(breakdown).reduce((sum, value) => sum + value, 0) };
-}
+export { storageBreakdown } from './storage-metrics.js';
 
 export function formatPathForSmartView(state, itemId) {
   const item = getItem(state, itemId);
