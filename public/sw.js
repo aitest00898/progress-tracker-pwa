@@ -1,13 +1,13 @@
-const CACHE = 'progress-tracker-v9';
+const CACHE = 'progress-tracker-v10';
 const INDEX_URL = './index.html';
 const ROOT_URL = './';
 const STATIC_SHELL = [
   './manifest.webmanifest',
   './manifest.en.webmanifest',
-  './icon.svg',
-  './icon-maskable.svg',
+  './favicon.png',
   './icon-192.png',
   './icon-512.png',
+  './icon-maskable.png',
   './apple-touch-icon.png',
 ];
 

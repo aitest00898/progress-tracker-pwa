@@ -361,12 +361,12 @@ function renderTopbar(state) {
   const header = node('header', { class: 'topbar' });
   if (state.meta.recoveryMode) {
     header.append(
-      node('div', { class: 'brand recovery-brand' }, node('span', { class: 'brand-mark', ariaLabel: tr('appName'), role: 'img' }, node('span', { class: 'brand-check' }, '✓')), node('span', { class: 'brand-copy' }, node('strong', {}, tr('appName')), node('small', {}, tr('dataRecoveryMode')))),
+      node('div', { class: 'brand recovery-brand' }, renderBrandMark(), node('span', { class: 'brand-copy' }, node('strong', {}, tr('appName')), node('small', {}, tr('dataRecoveryMode')))),
       node('div', { class: 'topbar-recovery-spacer' }),
     );
     return header;
   }
-  const brand = node('button', { class: 'brand', type: 'button', onClick: () => setPage('categories', state.settings.defaultCategoryId ?? state.categories[0]?.id) }, node('span', { class: 'brand-mark', ariaLabel: tr('appName'), role: 'img' }, node('span', { class: 'brand-check' }, '✓')), node('span', { class: 'brand-copy' }, node('strong', {}, tr('appName')), node('small', {}, tr('brandTagline'))));
+  const brand = node('button', { class: 'brand', type: 'button', onClick: () => setPage('categories', state.settings.defaultCategoryId ?? state.categories[0]?.id) }, renderBrandMark(), node('span', { class: 'brand-copy' }, node('strong', {}, tr('appName')), node('small', {}, tr('brandTagline'))));
   const search = node('input', { class: 'global-search', type: 'search', placeholder: tr('searchPlaceholder'), value: ui.search, ariaLabel: tr('searchPlaceholder'), onInput: (event) => { ui.search = event.target.value; scheduleRender(); }, onKeydown: (event) => { if (event.key === 'Escape') { ui.search = ''; scheduleRender(); } } });
   const online = navigator.onLine;
   const storageLabel = repository.volatile ? tr('storageVolatile') : online ? tr('connectionOnline') : tr('connectionOffline');
@@ -374,6 +374,10 @@ function renderTopbar(state) {
   const actions = node('div', { class: 'topbar-actions' }, status, iconButton('☼', tr('theme'), () => cycleTheme(state)), iconButton('⚙', tr('navSettings'), () => setPage('settings')));
   header.append(brand, node('div', { class: 'topbar-search' }, search), actions);
   return header;
+}
+
+function renderBrandMark() {
+  return node('span', { class: 'brand-mark', ariaLabel: tr('appName'), role: 'img' }, node('img', { src: './icon-192.png', alt: '' }));
 }
 
 function cycleTheme(state) {

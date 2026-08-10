@@ -12,15 +12,37 @@ test('localized PWA manifests use relative Pages-safe identity and complete icon
     assert.equal(manifest.display, 'standalone');
     assert.ok(manifest.icons.some((icon) => icon.sizes === '192x192'));
     assert.ok(manifest.icons.some((icon) => icon.sizes === '512x512'));
-    assert.ok(manifest.icons.some((icon) => icon.purpose === 'maskable'));
+    assert.ok(manifest.icons.some((icon) => icon.src === './icon-maskable.png' && icon.purpose === 'maskable'));
+    assert.ok(manifest.icons.every((icon) => icon.type === 'image/png'));
   }
   assert.equal(zh.lang, 'zh-Hant-TW');
   assert.equal(en.lang, 'en');
 });
 
+test('supplied artwork powers favicon, PWA, Apple and in-app brand icon surfaces', async () => {
+  const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  const dimensions = async (path) => {
+    const bytes = await readFile(path);
+    assert.ok(bytes.subarray(0, 8).equals(pngSignature), `${path} is not a PNG`);
+    return [bytes.readUInt32BE(16), bytes.readUInt32BE(20)];
+  };
+  assert.deepEqual(await dimensions('public/favicon.png'), [64, 64]);
+  assert.deepEqual(await dimensions('public/icon-192.png'), [192, 192]);
+  assert.deepEqual(await dimensions('public/icon-512.png'), [512, 512]);
+  assert.deepEqual(await dimensions('public/icon-maskable.png'), [512, 512]);
+  assert.deepEqual(await dimensions('public/apple-touch-icon.png'), [180, 180]);
+  const html = await readFile('index.html', 'utf8');
+  const app = await readFile('src/app.js', 'utf8');
+  assert.match(html, /rel="icon" href="\.\/favicon\.png"/);
+  assert.match(html, /apple-touch-icon\.png/);
+  assert.match(app, /src: '\.\/icon-192\.png'/);
+});
+
 test('Service Worker caches hashed build assets before atomically replacing the offline document', async () => {
   const source = await readFile('public/sw.js', 'utf8');
-  assert.match(source, /progress-tracker-v9/);
+  assert.match(source, /progress-tracker-v10/);
+  assert.match(source, /favicon\.png/);
+  assert.match(source, /icon-maskable\.png/);
   assert.match(source, /documentAssets\(html\)/);
   assert.match(source, /await Promise\.all\(assets\.map/);
   assert.match(source, /Content-Type', 'text\/javascript/);
