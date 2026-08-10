@@ -73,13 +73,19 @@ export function loadState(db) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAMES, 'readonly');
     const requests = Object.fromEntries(STORE_NAMES.map((store) => [store, tx.objectStore(store).getAll()]));
-    tx.oncomplete = () => {
+    tx.oncomplete = async () => {
       try {
         const values = Object.fromEntries(Object.entries(requests).map(([store, request]) => [store, request.result ?? []]));
         const root = values.meta.find((record) => record.key === 'root')?.value;
-        const state = normalizeState(root ?? makeEmptyState());
+        const hasPersistedRecords = Object.values(values).some((records) => records.length > 0);
+        if (!root && !hasPersistedRecords) {
+          const initial = makeEmptyState();
+          await saveState(db, initial);
+          resolve(initial);
+          return;
+        }
+        const state = normalizeState(root ? { meta: root } : makeEmptyState());
         for (const store of STORE_NAMES) {
-          if (!root) continue;
           if (['meta', 'today', 'settings', 'smartOrders'].includes(store)) continue;
           if (store === 'categories') state.categories = values[store].map((record) => record.value);
           else if (store === 'items') state.items = values[store].map((record) => record.value);
@@ -96,11 +102,10 @@ export function loadState(db) {
           else if (store === 'performance') state.performance = values[store].map((record) => record.value);
           else if (store === 'capabilities') state.capabilities = values[store].find((record) => record.key === 'root')?.value ?? state.capabilities;
         }
-        if (root) {
-          state.today = values.today.find((record) => record.key === 'root')?.value ?? state.today;
-          state.settings = values.settings.find((record) => record.key === 'root')?.value ?? state.settings;
-          state.smartOrders = values.smartOrders.find((record) => record.key === 'root')?.value ?? state.smartOrders;
-        }
+        state.today = values.today.find((record) => record.key === 'root')?.value ?? state.today;
+        state.settings = values.settings.find((record) => record.key === 'root')?.value ?? state.settings;
+        state.smartOrders = values.smartOrders.find((record) => record.key === 'root')?.value ?? state.smartOrders;
+        if (!root) state.meta.schemaVersion = 0;
         resolve(normalizeState(state));
       } catch (error) { reject(new StorageError('IndexedDB state read failed', error)); }
     };

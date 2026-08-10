@@ -20,6 +20,7 @@ test('localized PWA manifests use relative Pages-safe identity and complete icon
 
 test('Service Worker caches hashed build assets before atomically replacing the offline document', async () => {
   const source = await readFile('public/sw.js', 'utf8');
+  assert.match(source, /progress-tracker-v9/);
   assert.match(source, /documentAssets\(html\)/);
   assert.match(source, /await Promise\.all\(assets\.map/);
   assert.match(source, /Content-Type', 'text\/javascript/);

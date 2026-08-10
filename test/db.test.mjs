@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { planStateChanges } from '../src/db.js';
+import { loadState, planStateChanges, saveStateChanges, STORE_NAMES } from '../src/db.js';
 import { makeEmptyState, makeItem } from '../src/schema.js';
 
 const at = '2026-08-10T09:00:00.000Z';
@@ -14,6 +14,45 @@ function fixture(count) {
   }));
   return state;
 }
+
+function memoryDatabase() {
+  const stores = Object.fromEntries(STORE_NAMES.map((name) => [name, new Map()]));
+  return {
+    stores,
+    transaction(names) {
+      const tx = {
+        objectStore(name) {
+          const store = stores[name];
+          return {
+            getAll: () => ({ result: [...store.values()].map((value) => structuredClone(value)) }),
+            clear: () => store.clear(),
+            put: (record) => store.set(record.key, structuredClone(record)),
+            delete: (key) => store.delete(key),
+          };
+        },
+      };
+      queueMicrotask(() => tx.oncomplete?.());
+      return tx;
+    },
+  };
+}
+
+test('a brand-new database is fully seeded before incremental writes and survives reload', async () => {
+  const db = memoryDatabase();
+  const initial = await loadState(db);
+  assert.equal(db.stores.meta.size, 1);
+  assert.equal(db.stores.categories.size, 1);
+  assert.equal(db.stores.settings.size, 1);
+  const datasetId = initial.meta.datasetId;
+  const categoryId = initial.categories[0].id;
+  const next = structuredClone(initial);
+  next.items.push({ ...makeItem({ categoryId, title: 'Persisted item', now: at }), id: 'persisted_item' });
+  await saveStateChanges(db, initial, next);
+  const reloaded = await loadState(db);
+  assert.equal(reloaded.meta.datasetId, datasetId);
+  assert.equal(reloaded.categories[0].id, categoryId);
+  assert.equal(reloaded.items[0].title, 'Persisted item');
+});
 
 test('single item edit produces one item put instead of a full-state rewrite', () => {
   const before = fixture(1000);
