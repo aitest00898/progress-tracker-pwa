@@ -25,6 +25,7 @@ import { restoreMigrationSnapshot } from './migration.js';
 const root = document.querySelector('#app');
 let repository;
 let renderScheduled = false;
+let renderFallbackTimer = null;
 let activeVirtualList = null;
 let renderEngineIndex = null;
 let renderNow = new Date();
@@ -93,7 +94,14 @@ function stop(event) { event.preventDefault(); event.stopPropagation(); }
 function scheduleRender() {
   if (renderScheduled) return;
   renderScheduled = true;
-  requestAnimationFrame(() => { renderScheduled = false; render(); });
+  const flush = () => {
+    if (!renderScheduled) return;
+    renderScheduled = false;
+    if (renderFallbackTimer !== null) { clearTimeout(renderFallbackTimer); renderFallbackTimer = null; }
+    render();
+  };
+  requestAnimationFrame(flush);
+  renderFallbackTimer = setTimeout(flush, 80);
 }
 
 function toast(message, kind = 'success', undo) {
