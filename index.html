@@ -3,13 +3,34 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#f7f8fb" />
-    <meta name="description" content="A local-first progress tracker for projects, work, learning, travel and daily life." />
+    <meta name="theme-color" content="#f2f2f7" />
+    <meta name="description" content="一款本機優先、離線可用，支援無限階層的通用進度追蹤器。" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="進度追蹤器" />
     <link rel="manifest" href="./manifest.webmanifest" />
     <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
     <title>進度追蹤器</title>
-    <script type="module" crossorigin src="./assets/index-DsmC0-n5.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-Ap7w_xy9.css">
+    <script>
+      (() => {
+        try {
+          const shell = JSON.parse(localStorage.getItem('progress-tracker-shell') || '{}');
+          const english = shell.language === 'en';
+          const dark = shell.theme === 'dark' || (shell.theme !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+          document.documentElement.lang = english ? 'en' : 'zh-Hant-TW';
+          document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+          document.title = english ? 'Progress Tracker' : '進度追蹤器';
+          document.querySelector('meta[name="apple-mobile-web-app-title"]').content = english ? 'Progress Tracker' : '進度追蹤器';
+          document.querySelector('meta[name="description"]').content = english
+            ? 'A local-first, offline-ready progress tracker with unlimited hierarchy.'
+            : '一款本機優先、離線可用，支援無限階層的通用進度追蹤器。';
+          document.querySelector('link[rel="manifest"]').href = english ? './manifest.en.webmanifest' : './manifest.webmanifest';
+        } catch { /* IndexedDB remains the canonical preference store. */ }
+      })();
+    </script>
+    <script type="module" crossorigin src="./assets/index-jHszNmlg.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-DadbZid5.css">
   </head>
   <body>
     <div id="app"></div>
