@@ -12,6 +12,7 @@ import {
 } from './engine.js';
 import { renderMarkdown } from './markdown.js';
 import { VirtualList } from './virtual-list.js';
+import { treeRowClassNames, treeRowMetrics, treeRowSemantics } from './tree-view.js';
 import { downloadText } from './storage.js';
 import { browserStorageEstimate, storageBreakdown } from './storage-metrics.js';
 import { exportPTMD, parsePTMD, previewImport, applyImportPreview, restorePreview } from './ptmd.js';
@@ -54,7 +55,12 @@ function node(tag, attributes = {}, ...children) {
     if (key === 'class' || key === 'className') element.className = value;
     else if (key === 'text') element.textContent = value;
     else if (key === 'html') element.innerHTML = value;
-    else if (key === 'style' && typeof value === 'object') Object.assign(element.style, value);
+    else if (key === 'style' && typeof value === 'object') {
+      for (const [property, propertyValue] of Object.entries(value)) {
+        if (property.startsWith('--')) element.style.setProperty(property, propertyValue);
+        else element.style[property] = propertyValue;
+      }
+    }
     else if (key === 'dataset' && typeof value === 'object') Object.assign(element.dataset, value);
     else if (key.startsWith('on') && typeof value === 'function') element.addEventListener(key.slice(2).toLowerCase(), value);
     else if (key === 'ariaLabel') element.setAttribute('aria-label', value);
@@ -483,23 +489,35 @@ function flattenTree(state, categoryId, focusId = null) {
   const expanded = state.settings.expandedByCategory?.[categoryId] ?? [];
   const expandedSet = new Set([...expanded, ...(focus ? [focus.id] : [])]);
   const result = [];
-  const visit = (item, depth) => {
-    result.push({ kind: 'item', item, depth });
+  const visit = (item, depth, siblingIndex = 0, siblingCount = 1) => {
+    result.push({ kind: 'item', item, depth, siblingIndex, siblingCount });
     if (!expandedSet.has(item.id)) return;
     const children = childrenOf(state, item.id, index);
-    for (const child of sortTreeForDisplay(state, children.filter((candidate) => candidate.status !== 'completed'), index)) visit(child, depth + 1);
+    const activeChildren = sortTreeForDisplay(state, children.filter((candidate) => candidate.status !== 'completed'), index);
+    activeChildren.forEach((child, childIndex) => visit(child, depth + 1, childIndex, activeChildren.length));
     const completedChildren = children.filter((candidate) => candidate.status === 'completed').sort((a, b) => a.completedOrder - b.completedOrder);
     if (completedChildren.length) {
       result.push({ kind: 'section', label: tr('completedItems'), count: completedChildren.length, depth: depth + 1 });
-      for (const child of completedChildren) visit(child, depth + 1);
+      completedChildren.forEach((child, childIndex) => visit(child, depth + 1, childIndex, completedChildren.length));
     }
   };
-  roots.forEach((item) => visit(item, 0));
+  roots.forEach((item, itemIndex) => visit(item, 0, itemIndex, roots.length));
   const completedRoots = categoryItems.filter((item) => item.parentId === (focus?.id ?? null) && item.status === 'completed').sort((a, b) => a.completedOrder - b.completedOrder);
   if (completedRoots.length && !focus) {
     result.push({ kind: 'section', label: tr('completedItems'), count: completedRoots.length });
-    for (const item of completedRoots) visit(item, 0);
+    completedRoots.forEach((item, itemIndex) => visit(item, 0, itemIndex, completedRoots.length));
   }
+  const itemEntries = result.filter((entry) => entry.kind === 'item');
+  let itemPosition = 0;
+  result.forEach((entry, index) => {
+    if (entry.kind !== 'item') return;
+    const previous = itemEntries[itemPosition - 1];
+    const next = itemEntries[itemPosition + 1];
+    entry.previousDepth = previous?.depth ?? null;
+    entry.nextDepth = next?.depth ?? null;
+    entry.itemIndex = index;
+    itemPosition += 1;
+  });
   return result;
 }
 
@@ -517,7 +535,32 @@ function renderTreeList(state, category) {
   const focus = focusRootForCategory(state, category.id);
   const holder = node('div', { class: `tree-list-holder ${focus ? 'focus-view' : ''}`, 'aria-label': tr('navCategories') });
   const rows = flattenTree(state, category.id, focus);
-  activeVirtualList?.destroy(); activeVirtualList = new VirtualList(holder, { rowHeight: 116, overscan: 10, renderRow: (entry) => entry.kind === 'section' ? node('div', { class: 'list-section-heading' }, node('span', {}, entry.label), node('small', {}, String(entry.count))) : renderItemRow(state, entry.item, { depth: Math.min(entry.depth, categoryDepthLimit()), tree: true }), empty: () => renderEmptyState('noItems', 'addItem', () => document.querySelector('.quick-create-input')?.focus()) });
+  const maxDepth = categoryDepthLimit();
+  const index = renderIndex(state);
+  const treeRowOptions = (entry) => {
+    if (entry.kind === 'section') return { height: 46, gap: 0 };
+    const depth = entry.depth;
+    const nextDepth = entry.nextDepth === null ? null : Math.min(entry.nextDepth, maxDepth);
+    const semantics = treeRowSemantics({ childCount: childrenOf(state, entry.item.id, index).length, depth, sourceDepth: entry.depth, maxDepth, tree: true, siblingIndex: entry.siblingIndex, siblingCount: entry.siblingCount, nextDepth });
+    return treeRowMetrics(semantics, { quickActions: ui.quickActionId === entry.item.id, hoverActions: window.innerWidth > 700 });
+  };
+  activeVirtualList?.destroy();
+  activeVirtualList = new VirtualList(holder, {
+    rowHeight: 116,
+    overscan: 10,
+    itemMetrics: treeRowOptions,
+    renderRow: (entry) => entry.kind === 'section'
+      ? node('div', { class: 'list-section-heading' }, node('span', {}, entry.label), node('small', {}, String(entry.count)))
+      : renderItemRow(state, entry.item, {
+        depth: entry.depth,
+        maxDepth,
+        nextDepth: entry.nextDepth,
+        siblingIndex: entry.siblingIndex,
+        siblingCount: entry.siblingCount,
+        tree: true,
+      }),
+    empty: () => renderEmptyState('noItems', 'addItem', () => document.querySelector('.quick-create-input')?.focus()),
+  });
   activeVirtualList.setItems(rows);
   return holder;
 }
@@ -537,11 +580,12 @@ function renderSearchResults(state) {
 
 function renderEmptyState(messageKey, actionKey = null, action = null) { return node('div', { class: 'empty-state' }, node('div', { class: 'empty-orbit' }, '◌'), heading(tr(messageKey), 2), node('p', {}, tr(`${messageKey}Hint`) === `${messageKey}Hint` ? '' : tr(`${messageKey}Hint`)), actionKey && action ? button(tr(actionKey), action, { className: 'primary-button' }) : null); }
 
-function renderItemRow(state, item, { depth = 0, tree = true, pathContext = false, smartView = null } = {}) {
+function renderItemRow(state, item, { depth = 0, sourceDepth = depth, maxDepth = 2, tree = true, pathContext = false, smartView = null, siblingIndex = 0, siblingCount = 1, nextDepth = null } = {}) {
   const index = renderIndex(state);
   const childItems = childrenOf(state, item.id, index);
   const isParent = childItems.length > 0;
-  const showRing = isParent && !smartView;
+  const semantics = treeRowSemantics({ childCount: childItems.length, depth, sourceDepth, maxDepth, tree, pathContext, smartView, siblingIndex, siblingCount, nextDepth });
+  const showRing = semantics.hasProgressRing;
   const progress = progressForItem(state, item.id, index.progressByItem, new Set(), index);
   const due = effectiveDue(state, item.id, index);
   const dueText = due.value ? relativeDueText(language(), due.value) : tr('noDeadline');
@@ -551,7 +595,28 @@ function renderItemRow(state, item, { depth = 0, tree = true, pathContext = fals
   const conflict = index.conflictsByItem.has(item.id);
   const reminders = index.remindersByItem.get(item.id) ?? [];
   const expanded = state.settings.expandedByCategory?.[item.categoryId]?.includes(item.id);
-  const row = node('article', { class: `item-row priority-${item.priority} ${item.status === 'completed' ? 'is-completed' : ''} ${ui.quickActionId === item.id ? 'quick-open' : ''} ${ui.highlightId === item.id ? 'item-highlight' : ''}`, style: { '--priority-color': priorityColor(item.priority), '--depth': String(depth) }, dataset: { itemId: item.id }, draggable: 'false', onContextmenu: (event) => { stop(event); if (conflict) blockConflictedEdit(); else openItemMenu(item); }, onDragover: (event) => { event.preventDefault(); row.classList.add('drag-target'); }, onDragleave: () => row.classList.remove('drag-target'), onDrop: (event) => { event.preventDefault(); row.classList.remove('drag-target'); if (itemHasConflict(currentState(), item.id) || itemHasConflict(currentState(), ui.dragItemId)) { blockConflictedEdit(); return; } if (ui.dragItemId && ui.dragItemId !== item.id) { if (smartView) mutate('smart_reorder', (draft) => reorderSmartView(draft, smartView, ui.dragItemId, item.id), 'itemOrderSaved'); else mutate('reorder_siblings', (draft) => reorderSiblings(draft, ui.dragItemId, item.id), 'itemOrderSaved'); } } });
+  const row = node('article', {
+    class: `item-row priority-${item.priority} ${treeRowClassNames(semantics)} ${item.status === 'completed' ? 'is-completed' : ''} ${ui.quickActionId === item.id ? 'quick-open' : ''} ${ui.highlightId === item.id ? 'item-highlight' : ''}`,
+    style: { '--priority-color': priorityColor(item.priority), '--depth': String(semantics.depth) },
+    dataset: {
+      itemId: item.id,
+      tree: String(semantics.isTreeRow),
+      depth: String(semantics.depth),
+      sourceDepth: String(semantics.sourceDepth),
+      parentId: item.parentId ?? '',
+      hasChildren: String(semantics.isParent),
+      leaf: String(semantics.isLeaf),
+      siblingIndex: String(semantics.siblingIndex),
+      siblingLast: String(semantics.isLastSibling),
+      nextDepth: semantics.nextDepth === null ? '' : String(semantics.nextDepth),
+      treeSpacing: semantics.spacing,
+    },
+    draggable: 'false',
+    onContextmenu: (event) => { stop(event); if (conflict) blockConflictedEdit(); else openItemMenu(item); },
+    onDragover: (event) => { event.preventDefault(); row.classList.add('drag-target'); },
+    onDragleave: () => row.classList.remove('drag-target'),
+    onDrop: (event) => { event.preventDefault(); row.classList.remove('drag-target'); if (itemHasConflict(currentState(), item.id) || itemHasConflict(currentState(), ui.dragItemId)) { blockConflictedEdit(); return; } if (ui.dragItemId && ui.dragItemId !== item.id) { if (smartView) mutate('smart_reorder', (draft) => reorderSmartView(draft, smartView, ui.dragItemId, item.id), 'itemOrderSaved'); else mutate('reorder_siblings', (draft) => reorderSiblings(draft, ui.dragItemId, item.id), 'itemOrderSaved'); } },
+  });
   const handle = node('button', { class: 'drag-handle', type: 'button', draggable: 'true', ariaLabel: tr('longPressDrag'), title: tr('longPressDrag'), onDragstart: (event) => { ui.dragItemId = item.id; event.dataTransfer.effectAllowed = 'move'; }, onDragend: () => { ui.dragItemId = null; } }, '⠿');
   bindPointerReorder(handle, row, item, smartView);
   const nextStatus = item.status === 'completed' ? 'active' : item.status === 'skipped' ? 'active' : 'completed';
@@ -564,7 +629,7 @@ function renderItemRow(state, item, { depth = 0, tree = true, pathContext = fals
   const meta = node('div', { class: `item-meta ${pathContext ? 'with-path' : ''}` }, node('span', { class: `due-text ${overdue ? 'overdue' : isToday ? 'today' : ''}`, title: due.source === 'inherited' ? tr('inherited') : due.source === 'explicit' ? tr('explicit') : tr('noDeadline') }, dueText), item.tags.length ? node('span', { class: 'tag-count' }, `#${item.tags.length}`) : null, path);
   const info = node('div', { class: 'item-main' }, titleLine, meta);
   const chevron = iconButton('›', tr('detail'), () => openDetail(item.id), { className: 'detail-chevron' });
-  const main = node('div', { class: `item-row-main ${showRing ? 'parent' : 'leaf'}`, onClick: (event) => { if (event.target.closest('button, input')) return; toggleQuickActions(item.id); } }, handle, statusButton, showRing ? ring : null, info, chevron);
+  const main = node('div', { class: `item-row-main ${showRing ? 'parent' : 'leaf'} ${semantics.isTreeRow ? 'tree-row-main' : ''}`, onClick: (event) => { if (event.target.closest('button, input')) return; toggleQuickActions(item.id); } }, handle, showRing ? ring : statusButton, info, chevron);
   const actionRow = node('div', { class: 'item-actions' }, button(item.status === 'completed' ? tr('reopen') : item.status === 'skipped' ? tr('unskip') : tr('complete'), () => conflict ? blockConflictedEdit() : performStatus(item, nextStatus), { className: 'row-action', icon: item.status === 'completed' ? '↺' : '✓' }), button(tr('addChild'), () => conflict ? blockConflictedEdit() : (ui.quickActionId = item.id, ui.addChildFor = item.id, scheduleRender()), { className: 'row-action', icon: '+' }), button(state.today.items[item.id] ? tr('removeFromToday') : tr('moveToToday'), () => conflict ? blockConflictedEdit() : toggleToday(item), { className: 'row-action', icon: '◷' }), iconButton('⋯', tr('more'), (event) => { stop(event); if (conflict) blockConflictedEdit(); else openItemMenu(item); }, { className: 'row-action-more' }));
   row.append(main, actionRow);
   if (ui.quickActionId === item.id) row.append(renderQuickActionRow(state, item));
@@ -685,7 +750,9 @@ function renderTodayRow(state, item) {
   const row = renderItemRow(state, item, { depth: 0, tree: false, pathContext: true });
   const selected = ui.selectedToday?.has(item.id);
   const checkbox = node('input', { class: 'bulk-checkbox', type: 'checkbox', checked: selected, ariaLabel: item.title, onChange: (event) => { ui.selectedToday ??= new Set(); if (event.target.checked) ui.selectedToday.add(item.id); else ui.selectedToday.delete(item.id); scheduleRender(); } });
-  row.querySelector('.item-row-main')?.prepend(checkbox);
+  const main = row.querySelector('.item-row-main');
+  main?.classList.add('has-bulk-checkbox');
+  main?.prepend(checkbox);
   return row;
 }
 
@@ -976,7 +1043,14 @@ function renderChildrenField(state, item) {
   const children = [...childrenOf(state, item.id, renderIndex(state))].sort((a, b) => (a.status === 'completed') - (b.status === 'completed') || a.activeOrder - b.activeOrder);
   const section = node('section', { class: 'detail-section children-section' }, node('div', { class: 'section-toolbar' }, heading(tr('children'), 3), button(tr('addChild'), () => openChildCreate(item), { className: 'text-button', icon: '+' })));
   if (!children.length) section.append(node('p', { class: 'muted' }, tr('noItems')));
-  else for (const child of children) section.append(renderItemRow(state, child, { depth: 0, tree: false }));
+  else children.forEach((child, childIndex) => section.append(renderItemRow(state, child, {
+    depth: 1,
+    maxDepth: 2,
+    nextDepth: childIndex < children.length - 1 ? 1 : null,
+    siblingIndex: childIndex,
+    siblingCount: children.length,
+    tree: true,
+  })));
   return section;
 }
 
