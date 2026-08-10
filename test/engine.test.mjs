@@ -30,6 +30,13 @@ test('new categories are inserted beside the current category', () => {
   assert.equal(created.order, 1);
 });
 
+test('quick create rejects an empty or whitespace-only title without adding an item', () => {
+  const s = state();
+  const result = createItem(s, { categoryId: s.categories[0].id, title: ' \n\t ' }, at);
+  assert.deepEqual(result, { ok: false, reason: 'required' });
+  assert.equal(s.items.length, 0);
+});
+
 test('moving a subtree preserves descendants and changes their category atomically', () => {
   const s = state();
   const target = createCategory(s, '旅行',  at).category;

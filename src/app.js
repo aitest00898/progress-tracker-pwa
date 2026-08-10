@@ -455,7 +455,8 @@ function renderCategoryBreadcrumb(state, category) {
 }
 
 function renderQuickCreate(state, category) {
-  const form = node('form', { class: 'quick-create', onSubmit: (event) => { stop(event); createFromQuickInput(state, category.id); } });
+  const submit = () => { void createFromQuickInput(state, category.id); };
+  const form = node('form', { class: 'quick-create', onSubmit: (event) => { stop(event); submit(); } });
   const input = node('input', {
     class: 'quick-create-input',
     type: 'text',
@@ -464,12 +465,13 @@ function renderQuickCreate(state, category) {
     onKeydown: (event) => {
       if (event.key === 'Enter' && !event.isComposing) {
         stop(event);
-        void createFromQuickInput(state, category.id);
+        submit();
       }
     },
   });
   const mode = node('label', { class: 'continuous-toggle' }, node('input', { type: 'checkbox', checked: ui.continuousCreate, onChange: (event) => { ui.continuousCreate = event.target.checked; } }), node('span', {}, tr('quickCreateHint')));
-  form.append(node('span', { class: 'quick-create-mark' }, '+'), input, button(tr('addItem'), () => createFromQuickInput(state, category.id), { className: 'primary-button quick-create-button' }), mode);
+  const quickCreateSubmit = node('button', { type: 'submit', class: 'quick-create-submit', ariaLabel: tr('addItem'), title: tr('addItem') }, '+');
+  form.append(quickCreateSubmit, input, button(tr('addItem'), submit, { className: 'primary-button quick-create-button' }), mode);
   return form;
 }
 

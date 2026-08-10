@@ -40,7 +40,7 @@ test('supplied artwork powers favicon, PWA, Apple and in-app brand icon surfaces
 
 test('Service Worker caches hashed build assets before atomically replacing the offline document', async () => {
   const source = await readFile('public/sw.js', 'utf8');
-  assert.match(source, /progress-tracker-v12/);
+  assert.match(source, /progress-tracker-v13/);
   assert.match(source, /favicon\.png/);
   assert.match(source, /icon-maskable\.png/);
   assert.match(source, /documentAssets\(html\)/);
