@@ -1,0 +1,13 @@
+{
+  "name": "進度追蹤器",
+  "short_name": "進度追蹤器",
+  "description": "Local-first progress tracker",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#f7f8fb",
+  "theme_color": "#f7f8fb",
+  "orientation": "any",
+  "icons": [
+    { "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
