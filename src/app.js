@@ -31,6 +31,7 @@ let repository;
 let renderScheduled = false;
 let renderFallbackTimer = null;
 let activeVirtualList = null;
+let retainedVirtualScroll = null;
 let gestureController = null;
 let renderEngineIndex = null;
 let renderNow = new Date();
@@ -108,6 +109,39 @@ function scheduleRender() {
   };
   requestAnimationFrame(flush);
   renderFallbackTimer = setTimeout(flush, 80);
+}
+
+function virtualViewKey(state = currentState()) {
+  if (!state || !['categories', 'smart'].includes(ui.page)) return null;
+  if (ui.page === 'smart') return `smart:${ui.smartView}`;
+  const categoryId = ui.categoryId ?? state.settings.defaultCategoryId ?? state.categories[0]?.id ?? '';
+  const focus = focusRootForCategory(state, categoryId) ?? '';
+  const context = ui.search.trim() ? `search:${ui.search.trim()}:${ui.tag.trim()}` : `tree:${focus}`;
+  return `category:${categoryId}:${context}`;
+}
+
+function retainVirtualScroll(state) {
+  const viewport = activeVirtualList?.viewport;
+  const key = virtualViewKey(state);
+  if (!viewport || !key) { retainedVirtualScroll = null; return; }
+  retainedVirtualScroll = {
+    key,
+    top: viewport.scrollTop,
+    bottomGap: Math.max(0, viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop),
+    atBottom: viewport.scrollTop >= Math.max(0, viewport.scrollHeight - viewport.clientHeight) - 1,
+  };
+}
+
+function restoreVirtualScroll(state) {
+  const retained = retainedVirtualScroll;
+  retainedVirtualScroll = null;
+  const viewport = activeVirtualList?.viewport;
+  if (!retained || retained.key !== virtualViewKey(state) || !viewport) return;
+  const maximum = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+  const nearBottom = retained.atBottom || (retained.top > 0 && retained.bottomGap <= 120);
+  viewport.scrollTop = nearBottom ? Math.max(0, maximum - (retained.atBottom ? 0 : retained.bottomGap)) : Math.min(retained.top, maximum);
+  activeVirtualList.render();
+  if (nearBottom) viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight - (retained.atBottom ? 0 : retained.bottomGap));
 }
 
 function toast(message, kind = 'success', undo) {
@@ -388,6 +422,7 @@ function focusItem(item) {
 function render() {
   if (!initialised || !repository?.getState()) return;
   const state = currentState();
+  retainVirtualScroll(state);
   renderNow = new Date();
   renderEngineIndex = createEngineIndex(state);
   const shell = documentShell(language());
@@ -404,6 +439,7 @@ function render() {
   activeVirtualList?.destroy();
   activeVirtualList = null;
   root.replaceChildren(renderShell(state));
+  restoreVirtualScroll(state);
 }
 
 function renderShell(state) {

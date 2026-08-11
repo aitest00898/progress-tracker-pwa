@@ -40,7 +40,7 @@ test('supplied artwork powers favicon, PWA, Apple and in-app brand icon surfaces
 
 test('Service Worker caches hashed build assets before atomically replacing the offline document', async () => {
   const source = await readFile('public/sw.js', 'utf8');
-  assert.match(source, /progress-tracker-v17/);
+  assert.match(source, /progress-tracker-v18/);
   assert.match(source, /favicon\.png/);
   assert.match(source, /icon-maskable\.png/);
   assert.match(source, /documentAssets\(html\)/);
@@ -68,6 +68,14 @@ test('document shell and responsive CSS preserve safe areas and reduced motion',
   assert.match(app, /const className = \['icon-button', options\.className\]/);
   assert.match(css, /env\(safe-area-inset-top/);
   assert.match(css, /env\(safe-area-inset-bottom/);
+  assert.match(css, /--virtual-list-bottom-clearance: 0px/);
+  assert.match(css, /padding: 2px 3px calc\(var\(--space-7\) \+ var\(--virtual-list-bottom-clearance\)\)/);
+  assert.match(css, /scroll-padding-bottom: var\(--virtual-list-bottom-clearance\)/);
+  assert.match(css, /--virtual-list-bottom-clearance: calc\(144px \+ var\(--safe-bottom\)\)/);
+  assert.match(css, /\.item-row-main\.leaf \{ grid-template-columns: var\(--touch-target\) 28px/);
+  assert.match(app, /function retainVirtualScroll\(state\)/);
+  assert.match(app, /bottomGap: Math\.max\(0, viewport\.scrollHeight - viewport\.clientHeight - viewport\.scrollTop\)/);
+  assert.match(app, /const nearBottom = retained\.atBottom \|\|/);
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(css, /animation-duration: \.01ms !important/);
   assert.match(css, /app-body\.recovery-only/);
