@@ -29,6 +29,7 @@ import {
   INTERACTION_CLASSES, INTERACTION_CONFIG, closestPressableControl,
   focusableSelector, isRowPressCancellation,
 } from './interaction.js';
+import { FEEDBACK_MODES, mutationFeedback } from './feedback.js';
 
 const root = /** @type {HTMLElement} */ (document.querySelector('#app'));
 let repository;
@@ -82,6 +83,8 @@ function node(tag, attributes = {}, ...children) {
     else if (key === 'dataset' && typeof value === 'object') Object.assign(element.dataset, value);
     else if (key.startsWith('on') && typeof value === 'function') element.addEventListener(key.slice(2).toLowerCase(), /** @type {EventListener} */ (value));
     else if (key === 'ariaLabel') element.setAttribute('aria-label', value);
+    else if (key === 'ariaSelected') element.setAttribute('aria-selected', value);
+    else if (key === 'ariaHidden') element.setAttribute('aria-hidden', value);
     else if (key === 'title') element.title = value;
     else if (key === 'disabled') element.disabled = Boolean(value);
     else if (key === 'checked') element.checked = Boolean(value);
@@ -102,6 +105,8 @@ function button(label, onClick, options = {}) {
     type: 'button',
     class: options.className ?? 'button',
     ariaLabel: options.ariaLabel ?? label,
+    role: options.role,
+    ariaSelected: options.ariaSelected,
     title: options.title,
     disabled: options.disabled,
     dataset: { interactionControl: 'true' },
@@ -296,7 +301,8 @@ async function mutate(label, mutator, successKey = null, options = {}) {
     toast(reasonMessage(result.reason), 'error');
     return result;
   }
-  if (successKey) toast(tr(successKey));
+  const feedback = mutationFeedback(label, successKey, options.feedback);
+  if (feedback === FEEDBACK_MODES.toast || feedback === FEEDBACK_MODES.undoToast) toast(tr(successKey));
   if (options.queue !== false) scheduleCloudSync();
   scheduleRender();
   return result;
@@ -1025,7 +1031,7 @@ function performDelete(item) {
 
 async function deleteConfirmed(item) {
   const hasDescendants = descendantsOf(currentState(), item.id).length > 0;
-  const result = await mutate('delete', (state) => { const outcome = softDeleteItem(state, item.id); if (outcome.ok) recordSemantic(state, 'delete', { count: outcome.ids.length }); return outcome; }, hasDescendants ? 'deletedWithDescendants' : 'itemDeleted');
+  const result = await mutate('delete', (state) => { const outcome = softDeleteItem(state, item.id); if (outcome.ok) recordSemantic(state, 'delete', { count: outcome.ids.length }); return outcome; }, null);
   if (result.ok) {
     const deletedId = currentState().deleted.find((entry) => entry.rootId === item.id)?.id;
     ui.detailId = null; ui.modal = null;
@@ -1125,8 +1131,8 @@ function renderSmartPage(state) {
     return page;
   }
   const views = ['today', 'upcoming', 'overdue', 'recentlyCompleted', 'readyToClose', 'recentlyActive', 'highAttention', 'stale', 'momentum', 'estimated', 'routine'];
-  const viewNav = node('div', { class: 'smart-view-nav' });
-  for (const view of views) viewNav.append(button(tr(`view${view[0].toUpperCase()}${view.slice(1)}`), () => setPage('smart', view), { className: `smart-view-button ${ui.smartView === view ? 'active' : ''}` }));
+  const viewNav = node('div', { class: 'smart-view-nav', role: 'tablist', ariaLabel: tr('navSmart') });
+  for (const view of views) viewNav.append(button(tr(`view${view[0].toUpperCase()}${view.slice(1)}`), () => setPage('smart', view), { className: `smart-view-button ${ui.smartView === view ? 'active' : ''}`, role: 'tab', ariaSelected: String(ui.smartView === view), title: tr(`view${view[0].toUpperCase()}${view.slice(1)}`) }));
   const items = smartViewItems(state, ui.smartView, renderNow, renderIndex(state));
   const activeItems = items.filter((item) => item.status !== 'completed');
   const completedItems = items.filter((item) => item.status === 'completed');
@@ -1194,9 +1200,31 @@ function renderReminderCard(state, entry) {
   const item = entry.item;
   const missed = entry.missedCount > 0;
   const card = node('article', { class: `reminder-card ${missed ? 'missed' : ''}` }, node('div', { class: 'reminder-card-main' }, node('span', { class: 'reminder-card-icon' }, '⌁'), node('div', {}, node('strong', {}, item.title), node('small', {}, pathString(state, item.id, renderIndex(state))), missed ? node('span', { class: 'missed-label' }, `${tr('missedReminder')} · ${tr('missedCount', { count: entry.missedCount })}`) : null)));
-  const actions = node('div', { class: 'reminder-card-actions' }, button(tr('remindComplete'), () => performStatus(item, 'completed'), { className: 'small-button' }), button(tr('remindToday'), () => { const reminder = entry.reminders.find((candidate) => candidate.status === 'missed' || candidate.status === 'today')?.reminder; if (reminder) mutate('reminder_suppress_today', (draft) => suppressReminderToday(draft, reminder.id), 'savedOffline'); }, { className: 'small-button' }), button(tr('remindNextLaunch'), () => { const reminder = entry.reminders[0]?.reminder; if (reminder) mutate('reminder_next_launch', (draft) => updateReminder(draft, reminder.id, { lastTriggeredAt: reminderOccurrence(draft, reminder)?.toISOString() }), 'savedOffline'); }, { className: 'small-button' }), button(tr('remindView'), () => openDetail(item.id), { className: 'small-button' }));
-  const snooze = node('div', { class: 'snooze-actions' }, node('span', {}, tr('remindSnooze')), ...[[10, 'snooze10'], [30, 'snooze30'], [60, 'snooze60']].map(([minutes, key]) => button(tr(key), () => snoozeEntry(entry, minutes), { className: 'text-button' })), button(tr('snoozeCustom'), () => openCustomSnooze(entry), { className: 'text-button' }));
-  card.append(actions, snooze); return card;
+  const actions = node('div', { class: 'reminder-card-actions' },
+    button(tr('remindComplete'), () => performStatus(item, 'completed'), { className: 'primary-button reminder-primary-action' }),
+    button(tr('remindView'), () => openDetail(item.id), { className: 'secondary-button reminder-secondary-action' }),
+    iconButton('⋯', tr('more'), () => openReminderActions(entry), { className: 'reminder-more-button' }),
+  );
+  card.append(actions); return card;
+}
+
+function openReminderActions(entry) {
+  const reminder = () => entry.reminders.find((candidate) => candidate.status === 'missed' || candidate.status === 'today')?.reminder ?? entry.reminders[0]?.reminder;
+  const closeAnd = (action) => { ui.modal = null; scheduleRender(); return action(); };
+  ui.modal = {
+    kind: 'menu',
+    title: entry.item.title,
+    body: node('div', { class: 'modal-actions vertical reminder-menu-actions' },
+      node('p', { class: 'menu-section-label' }, tr('remindSnooze')),
+      button(tr('remindToday'), () => closeAnd(() => { const target = reminder(); if (target) return mutate('reminder_suppress_today', (draft) => suppressReminderToday(draft, target.id), 'savedOffline'); }), { className: 'menu-action-button' }),
+      button(tr('remindNextLaunch'), () => closeAnd(() => { const target = reminder(); if (target) return mutate('reminder_next_launch', (draft) => updateReminder(draft, target.id, { lastTriggeredAt: reminderOccurrence(draft, target)?.toISOString() }), 'savedOffline'); }), { className: 'menu-action-button' }),
+      button(tr('snooze10'), () => closeAnd(() => snoozeEntry(entry, 10)), { className: 'menu-action-button' }),
+      button(tr('snooze30'), () => closeAnd(() => snoozeEntry(entry, 30)), { className: 'menu-action-button' }),
+      button(tr('snooze60'), () => closeAnd(() => snoozeEntry(entry, 60)), { className: 'menu-action-button' }),
+      button(tr('snoozeCustom'), () => { ui.modal = null; openCustomSnooze(entry); }, { className: 'menu-action-button' }),
+    ),
+  };
+  scheduleRender();
 }
 
 async function snoozeEntry(entry, minutes) {
@@ -1528,11 +1556,18 @@ function renderGeneralSettings(state) {
   const themeSelect = node('select', { value: state.settings.theme, ariaLabel: tr('theme'), onChange: (event) => updateSetting('theme_changed', (settings) => { settings.theme = event.target.value; }, 'themeChanged') }, node('option', { value: 'system' }, tr('themeSystem')), node('option', { value: 'light' }, tr('themeLight')), node('option', { value: 'dark' }, tr('themeDark')));
   const pageSelect = node('select', { value: state.settings.defaultPage, ariaLabel: tr('defaultStartPage'), onChange: (event) => updateSetting('default_page_changed', (settings) => { settings.defaultPage = event.target.value; }, 'savedOffline') }, node('option', { value: 'categories' }, tr('pageCategories')), node('option', { value: 'today' }, tr('pageToday')), node('option', { value: 'reminders' }, tr('pageReminders')), node('option', { value: 'smart' }, tr('pageSmart')));
   const categorySelect = node('select', { value: state.settings.defaultCategoryId ?? '', ariaLabel: tr('defaultStartCategory'), onChange: (event) => updateSetting('default_category_changed', (settings) => { settings.defaultCategoryId = event.target.value; }, 'savedOffline') }, ...[...state.categories].sort((a, b) => a.order - b.order).map((category) => node('option', { value: category.id }, category.title)));
-  section.append(settingCard(tr('language'), inputField(tr('language'), languageSelect)), settingCard(tr('theme'), inputField(tr('theme'), themeSelect)), settingCard(tr('defaultStart'), inputField(tr('defaultStartPage'), pageSelect), inputField(tr('defaultStartCategory'), categorySelect)));
+  section.append(settingCard(
+    tr('settingsGeneral'),
+    inputField(tr('language'), languageSelect),
+    inputField(tr('theme'), themeSelect),
+    node('p', { class: 'setting-subgroup-label' }, tr('defaultStart')),
+    inputField(tr('defaultStartPage'), pageSelect),
+    inputField(tr('defaultStartCategory'), categorySelect),
+  ));
   return section;
 }
 
-function settingCard(title, ...children) { return node('section', { class: 'setting-card' }, heading(title, 2), ...children); }
+function settingCard(title, ...children) { return node('section', { class: 'setting-card setting-group' }, heading(title, 2, 'setting-group-title'), ...children); }
 
 function renderItemSettings(state) {
   return node('div', { class: 'settings-stack' }, settingCard(tr('settingsItems'), settingsToggle(tr('enableSmartSort'), state.settings.smartSort, (event) => updateSetting('smart_sort_changed', (settings) => { settings.smartSort = event.target.checked; }, 'savedOffline'), tr('smartSortHint')), settingsToggle(tr('showCompleted'), state.settings.showCompleted !== false, (event) => updateSetting('show_completed_changed', (settings) => { settings.showCompleted = event.target.checked; }, 'savedOffline'))));
@@ -1555,16 +1590,29 @@ function renderDataSettings(state) {
   const stats = { items: state.items.length, completed: state.items.filter((item) => item.status === 'completed').length, deleted: state.deleted.length, history: state.history.length + deletedHistory };
   const usage = storageBreakdown(state);
   const lastBackup = state.backupMeta.filter((backup) => backup.scope === 'full').sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
-  const section = node('div', { class: 'settings-stack' });
-  section.append(settingCard(tr('dataOverview'), metricGrid([[tr('itemCount'), stats.items], [tr('completedCount'), stats.completed], [tr('deletedCount'), stats.deleted], [tr('historyCount'), stats.history], [tr('lastBackup'), lastBackup ? formatDateTime(language(), lastBackup.createdAt) : tr('notBackedUp')]])));
-  section.append(renderExportCard(state), renderImportCard(), renderFullRestoreCard(), renderCloudCard(state), renderConflictArchive(state), renderActiveConflicts(state), renderRecycleBin(state), renderRecoveryCard(state), renderDangerousDataCard());
+  const section = node('div', { class: 'settings-stack data-settings-stack' });
+  section.append(
+    node('div', { class: 'settings-cluster' },
+      node('p', { class: 'settings-cluster-label' }, tr('dataOverviewGroup')),
+      settingCard(tr('dataOverview'), metricGrid([[tr('itemCount'), stats.items], [tr('completedCount'), stats.completed], [tr('deletedCount'), stats.deleted], [tr('historyCount'), stats.history], [tr('lastBackup'), lastBackup ? formatDateTime(language(), lastBackup.createdAt) : tr('notBackedUp')]])),
+    ),
+    node('div', { class: 'settings-cluster' },
+      node('p', { class: 'settings-cluster-label' }, tr('dataBackupGroup')),
+      renderExportCard(state), renderImportCard(), renderFullRestoreCard(), renderCloudCard(state),
+    ),
+    node('div', { class: 'settings-cluster' },
+      node('p', { class: 'settings-cluster-label' }, tr('dataRecoveryGroup')),
+      renderConflictArchive(state), renderActiveConflicts(state), renderRecycleBin(state), renderRecoveryCard(state),
+    ),
+    node('div', { class: 'settings-cluster danger-zone' }, node('p', { class: 'settings-cluster-label' }, tr('dataDangerGroup')), renderDangerousDataCard()),
+  );
   const labels = {
     metadata: 'usageMetadata', categories: 'usageCategories', items: 'usageItems', notes: 'usageNotes', tags: 'usageTags', history: 'usageHistory', reminders: 'usageReminders',
     today: 'usageToday', deleted: 'usageDeleted', sync: 'usageSync', conflicts: 'usageConflicts', backup: 'usageBackup',
     recovery: 'usageRecovery', diagnostics: 'usageDiagnostics', settings: 'usageSettings',
   };
   const estimate = state.capabilities?.storageEstimate ?? null;
-  section.append(settingCard(
+  section.append(node('div', { class: 'settings-cluster' }, node('p', { class: 'settings-cluster-label' }, tr('dataStorageGroup')), settingCard(
     tr('localStorage'),
     node('div', { class: 'usage-list' },
       node('strong', {}, `${tr('logicalUsageEstimate')}: ${formatBytes(usage.total)}`),
@@ -1576,7 +1624,7 @@ function renderDataSettings(state) {
       node('div', { class: 'usage-row' }, node('span', {}, tr('browserQuota')), node('span', {}, formatBytes(estimate.quota))),
       node('div', { class: 'usage-row' }, node('span', {}, tr('browserAvailable')), node('span', {}, formatBytes(estimate.available))),
     ) : node('p', { class: 'field-hint' }, tr('quotaUnavailable')),
-  ));
+  )));
   return section;
 }
 
@@ -2290,14 +2338,14 @@ function renderModal(state) {
   const title = heading(modal.title ?? tr('more'), 2);
   title.id = 'active-modal-title';
   const backdrop = node('div', {
-    class: 'modal-backdrop',
+    class: `modal-backdrop ${modal.kind === 'menu' ? 'menu-backdrop' : ''}`,
     'data-modal-backdrop': 'true',
     onClick: (event) => {
       if (event.target === event.currentTarget && !modal.danger) closeModal();
     },
   });
   const box = node('section', {
-    class: `modal-box ${modal.danger ? 'danger-modal' : ''}`,
+    class: `modal-box ${modal.danger ? 'danger-modal' : ''} ${modal.kind === 'menu' ? 'menu-modal' : ''}`,
     role: modal.danger ? 'alertdialog' : 'dialog',
     'aria-modal': 'true',
     'aria-labelledby': title.id,
@@ -2393,7 +2441,7 @@ async function confirmImport(preview) {
   const result = applyImportPreview(currentState(), preview);
   if (!result.ok) { toast(tr('errorMalformedImport'), 'error'); return; }
   const committed = await repository.replaceState(result.state, 'import_add_only');
-  if (committed.ok) { ui.modal = null; ui.importPreview = null; toast(tr('savedOffline')); }
+  if (committed.ok) { ui.modal = null; ui.importPreview = null; toast(tr('importSuccess')); }
 }
 
 function renderRestoreModal(content, preview) {

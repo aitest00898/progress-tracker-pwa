@@ -40,7 +40,7 @@ test('supplied artwork powers favicon, PWA, Apple and in-app brand icon surfaces
 
 test('Service Worker caches hashed build assets before atomically replacing the offline document', async () => {
   const source = await readFile('public/sw.js', 'utf8');
-  assert.match(source, /progress-tracker-v20/);
+  assert.match(source, /progress-tracker-v21/);
   assert.match(source, /favicon\.png/);
   assert.match(source, /icon-maskable\.png/);
   assert.match(source, /documentAssets\(html\)/);
@@ -105,4 +105,21 @@ test('interaction layer exposes unified press, focus, reduced-motion, and modal 
   assert.match(app, /installInteractionFeedback\(\)/);
   assert.match(app, /trapModalFocus\(event\)/);
   assert.match(app, /role: modal\.danger \? 'alertdialog' : 'dialog'/);
+});
+
+test('Phase 2 visual hierarchy keeps semantic roles and restrained surface contracts', async () => {
+  const css = await readFile('src/styles.css', 'utf8');
+  const app = await readFile('src/app.js', 'utf8');
+  assert.match(css, /--content-readable-width: 760px/);
+  assert.match(css, /--surface-navigation: var\(--glass\)/);
+  assert.match(css, /\.settings-cluster/);
+  assert.match(css, /\.settings-content \.setting-group[\s\S]*background: transparent/);
+  assert.match(css, /\.menu-backdrop/);
+  assert.match(css, /\.menu-action-button/);
+  assert.match(css, /@media \(pointer: coarse\)/);
+  assert.match(app, /showRing \? ring : statusButton/);
+  assert.match(app, /reminder-primary-action/);
+  assert.match(app, /role: 'tablist'/);
+  assert.match(app, /ariaSelected: options\.ariaSelected/);
+  assert.match(app, /mutationFeedback\(label, successKey, options\.feedback\)/);
 });

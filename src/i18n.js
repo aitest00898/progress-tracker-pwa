@@ -552,6 +552,12 @@ Object.assign(messages['zh-TW'], {
   diagnosticTime: '時間',
   diagnosticRedacted: '已隱去',
   diagnosticNoErrors: '目前沒有錯誤紀錄。',
+  importSuccess: '匯入完成；既有資料未被覆寫。',
+  dataOverviewGroup: '資料概覽',
+  dataBackupGroup: '備份與匯入',
+  dataRecoveryGroup: '復原與衝突',
+  dataDangerGroup: '危險操作',
+  dataStorageGroup: '儲存空間',
 });
 
 Object.assign(messages.en, {
@@ -662,6 +668,12 @@ Object.assign(messages.en, {
   diagnosticTime: 'Time',
   diagnosticRedacted: 'Redacted',
   diagnosticNoErrors: 'No errors recorded.',
+  importSuccess: 'Import complete; existing data was not overwritten.',
+  dataOverviewGroup: 'Data overview',
+  dataBackupGroup: 'Backup & import',
+  dataRecoveryGroup: 'Recovery & conflicts',
+  dataDangerGroup: 'Danger zone',
+  dataStorageGroup: 'Storage',
 });
 
 export function getLocale(language) {
