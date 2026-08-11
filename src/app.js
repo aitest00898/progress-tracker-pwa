@@ -5,7 +5,7 @@ import {
   addReminder, addToToday, attentionScore, canMove, childrenOf, completionNeedsConfirmation,
   createCategory, createItem, dateWarnings, descendantsOf, derivedTodayItems, duplicateSubtree, effectiveDue, effectivePlannedStart,
   estimateCompletion, getCategory, getItem, itemPath, markTodayCompletion, createEngineIndex,
-  formatProgress, momentumScore, moveImpact, moveSubtree, pathString, progressResultForItem, recordHistory, removeFromToday, removeReminder, renameCategory,
+  momentumScore, moveImpact, moveSubtree, pathString, progressResultForItem, recordHistory, removeFromToday, removeReminder, renameCategory,
   renameItem, reorderCategories, reorderSiblings, reminderCenter, reminderOccurrence, searchItems,
   setDue, setImportance, setItemStatus, setNotes, setPriority, setTags, softDeleteCategory, softDeleteItem, snoozeReminder,
   smartViewItems, suppressReminderToday, updateReminder, restoreDeleted, reorderSmartView, reminderPatternSuggestion, dueImpactOnRemoval,
@@ -13,7 +13,9 @@ import {
 import { renderMarkdown } from './markdown.js';
 import { VirtualList } from './virtual-list.js';
 import { treeRowClassNames, treeRowMetrics, treeRowSemantics } from './tree-view.js';
-import { SWIPE_CONFIG, classifySwipeAxis, shouldTriggerSwipe, swipeDirection, swipeOffset } from './swipe.js';
+import { createGestureController } from './gesture-controller.js';
+import { GESTURE_ZONES, resolveInteractionPolicy, validateReorderTarget } from './gesture.js';
+import { progressPresentation } from './progress-presentation.js';
 import { downloadText } from './storage.js';
 import { browserStorageEstimate, storageBreakdown } from './storage-metrics.js';
 import { exportPTMD, parsePTMD, previewImport, applyImportPreview, restorePreview } from './ptmd.js';
@@ -24,11 +26,12 @@ import {
 } from './sync.js';
 import { restoreMigrationSnapshot } from './migration.js';
 
-const root = document.querySelector('#app');
+const root = /** @type {HTMLElement} */ (document.querySelector('#app'));
 let repository;
 let renderScheduled = false;
 let renderFallbackTimer = null;
 let activeVirtualList = null;
+let gestureController = null;
 let renderEngineIndex = null;
 let renderNow = new Date();
 let initialised = false;
@@ -37,7 +40,7 @@ let syncTimer = null;
 let syncInFlight = false;
 const ui = {
   page: 'categories', categoryId: null, smartView: 'today', settingsPage: 'general', detailId: null,
-  search: '', tag: '', quickActionId: null, expanded: new Set(), focusRoot: null, notesTab: 'edit',
+  search: '', tag: '', quickActionId: null, addChildFor: null, expanded: new Set(), focusRoot: null, notesTab: 'edit',
   modal: null, toast: null, importPreview: null, restorePreview: null, contextItemId: null, continuousCreate: true,
   dragItemId: null, dragCategoryId: null, selectedDeleted: new Set(), moveItemId: null, duplicateItemId: null,
   dragTargetId: null,
@@ -164,115 +167,174 @@ function clearFocus(categoryId) {
   mutate('focus_cleared', (state) => { delete state.settings.focusByCategory[categoryId]; return { ok: true }; }, null, { queue: false });
 }
 
-/** @param {Element} element @param {(event: PointerEvent) => void} callback @param {{duration?: number, onStart?: (element: Element) => void, onCancel?: (element: Element) => void}} [options] */
-function bindLongPress(element, callback, { duration = 650, onStart, onCancel } = {}) {
-  let timer = null; let startX = 0; let startY = 0; let triggered = false;
-  const start = (event) => {
-    if (event.pointerType === 'mouse' && event.button !== 0) return;
-    startX = event.clientX; startY = event.clientY; triggered = false; onStart?.(element);
-    timer = setTimeout(() => { triggered = true; element.classList.add('long-pressed'); if (canVibrate()) navigator.vibrate(8); callback(event); }, duration);
-  };
-  const cancel = (event) => {
-    if (timer && (Math.abs(event.clientX - startX) > 10 || Math.abs(event.clientY - startY) > 10 || event.type === 'pointerup' || event.type === 'pointercancel')) clearTimeout(timer);
-    timer = null; if (!triggered) onCancel?.(element); element.classList.remove('long-pressed');
-  };
-  element.addEventListener('pointerdown', start);
-  element.addEventListener('pointermove', cancel);
-  element.addEventListener('pointerup', cancel);
-  element.addEventListener('pointercancel', cancel);
-  element.addEventListener('pointerleave', cancel);
+function clearGestureClasses() {
+  root?.querySelectorAll?.('.drag-target, .category-drag-target, .dragging, .category-dragging, .long-pressed, .is-swiping, .swipe-left, .swipe-right')?.forEach((element) => {
+    element.classList.remove('drag-target', 'category-drag-target', 'dragging', 'category-dragging', 'long-pressed', 'is-swiping', 'swipe-left', 'swipe-right');
+    (/** @type {HTMLElement} */ (element)).style.removeProperty('--swipe-x');
+  });
 }
 
-function bindPointerReorder(handle, row, item, smartView = null) {
-  let timer = null;
-  let active = false;
-  let pointerId = null;
-  let startX = 0;
-  let startY = 0;
-  const clearTargets = () => { document.querySelectorAll('.item-row.drag-target').forEach((target) => target.classList.remove('drag-target')); ui.dragTargetId = null; };
-  const cleanup = () => {
-    clearTimeout(timer); timer = null; active = false; pointerId = null; ui.dragItemId = null; row.classList.remove('dragging'); handle.classList.remove('long-pressed'); clearTargets();
-  };
-  handle.addEventListener('pointerdown', (event) => {
-    if (event.pointerType === 'mouse' || event.button !== 0) return;
-    if (itemHasConflict(currentState(), item.id)) { blockConflictedEdit(); return; }
-    pointerId = event.pointerId; startX = event.clientX; startY = event.clientY;
-    timer = setTimeout(() => {
-      active = true; ui.dragItemId = item.id; row.classList.add('dragging'); handle.classList.add('long-pressed');
-      if (canVibrate()) navigator.vibrate(8);
-      handle.setPointerCapture?.(pointerId);
-    }, 650);
-  });
-  handle.addEventListener('pointermove', (event) => {
-    if (!active) {
-      if (Math.abs(event.clientX - startX) > 10 || Math.abs(event.clientY - startY) > 10) clearTimeout(timer);
-      return;
-    }
-    event.preventDefault();
-    const target = /** @type {HTMLElement|null} */ (document.elementFromPoint(event.clientX, event.clientY)?.closest?.('.item-row'));
-    clearTargets();
-    if (!target || target === row) return;
-    const targetItem = getItem(currentState(), target.dataset.itemId);
-    const allowed = smartView
-      ? smartViewItems(currentState(), smartView).some((candidate) => candidate.id === targetItem?.id)
-      : targetItem?.categoryId === item.categoryId && targetItem?.parentId === item.parentId && targetItem?.status === item.status;
-    if (allowed) { target.classList.add('drag-target'); ui.dragTargetId = targetItem.id; }
-  });
-  handle.addEventListener('pointerup', (event) => {
-    if (!active) { clearTimeout(timer); timer = null; return; }
-    const targetId = ui.dragTargetId;
-    cleanup();
-    if (!targetId || targetId === item.id) return;
-    if (smartView) mutate('smart_reorder', (draft) => reorderSmartView(draft, smartView, item.id, targetId), 'itemOrderSaved');
-    else mutate('reorder_siblings', (draft) => reorderSiblings(draft, item.id, targetId), 'itemOrderSaved');
-  });
-  handle.addEventListener('pointercancel', cleanup);
+function clearTransientInteractionState({ preserveSelection = false } = {}) {
+  gestureController?.cancelAll();
+  ui.quickActionId = null;
+  ui.addChildFor = null;
+  ui.dragItemId = null;
+  ui.dragCategoryId = null;
+  ui.dragTargetId = null;
+  if (!preserveSelection) ui.selectedToday?.clear();
+  clearGestureClasses();
 }
 
-function bindPointerCategoryReorder(handle, row, category) {
-  let timer = null;
-  let active = false;
-  let pointerId = null;
-  let startX = 0;
-  let startY = 0;
-  const clearTargets = () => { document.querySelectorAll('.category-nav-row.category-drag-target').forEach((target) => target.classList.remove('category-drag-target')); ui.dragCategoryId = null; };
-  const cleanup = () => {
-    clearTimeout(timer); timer = null; active = false; pointerId = null;
-    row.classList.remove('category-dragging'); handle.classList.remove('long-pressed'); clearTargets();
-  };
-  handle.addEventListener('pointerdown', (event) => {
-    if (event.pointerType === 'mouse' || event.button !== 0) return;
-    pointerId = event.pointerId; startX = event.clientX; startY = event.clientY;
-    timer = setTimeout(() => {
-      active = true; ui.dragCategoryId = category.id; row.classList.add('category-dragging'); handle.classList.add('long-pressed');
-      if (canVibrate()) navigator.vibrate(8);
-      handle.setPointerCapture?.(pointerId);
-    }, 650);
+function rowPolicy(row, zone, event) {
+  const context = row.dataset.gestureContext ?? 'tree';
+  return resolveInteractionPolicy({
+    rowType: row.classList.contains('category-nav-row') ? 'category' : 'item',
+    surface: context,
+    isParent: row.dataset.hasChildren === 'true',
+    pathContext: ['search', 'smart', 'today'].includes(context),
   });
-  handle.addEventListener('pointermove', (event) => {
-    if (!active) {
-      if (Math.abs(event.clientX - startX) > 10 || Math.abs(event.clientY - startY) > 10) clearTimeout(timer);
-      return;
-    }
-    event.preventDefault();
-    const target = /** @type {HTMLElement|null} */ (document.elementFromPoint(event.clientX, event.clientY)?.closest?.('.category-nav-row'));
-    document.querySelectorAll('.category-nav-row.category-drag-target').forEach((candidate) => candidate.classList.remove('category-drag-target'));
-    if (target && target !== row) target.classList.add('category-drag-target');
-  });
-  handle.addEventListener('pointerup', (event) => {
-    if (!active) { clearTimeout(timer); timer = null; return; }
-    const target = /** @type {HTMLElement|null} */ (document.elementFromPoint(event.clientX, event.clientY)?.closest?.('.category-nav-row'));
-    const targetId = target?.dataset?.categoryId;
-    cleanup();
-    if (!targetId || targetId === category.id) return;
-    mutate('category_reorder', (draft) => reorderCategories(draft, category.id, targetId), 'categoryReordered');
-  });
-  handle.addEventListener('pointercancel', cleanup);
 }
 
-function canVibrate() { return Boolean(globalThis.navigator?.vibrate) && /Android/i.test(globalThis.navigator?.userAgent ?? ''); }
+function rowItem(row) { return row?.dataset.itemId ? getItem(currentState(), row.dataset.itemId, renderIndex(currentState())) : null; }
+function rowCategory(row) { return row?.dataset.categoryId ? getCategory(currentState(), row.dataset.categoryId, renderIndex(currentState())) : null; }
+
+function handleGestureTap({ row, zone }) {
+  const category = rowCategory(row);
+  if (category) { setPage('categories', category.id); return; }
+  const item = rowItem(row);
+  if (!item) return;
+  const context = row.dataset.gestureContext ?? 'tree';
+  if (context === 'search' && zone !== GESTURE_ZONES.control) { focusItem(item); return; }
+  if (zone === GESTURE_ZONES.title && ['smart', 'today'].includes(context)) { focusItem(item); return; }
+  if (zone === GESTURE_ZONES.title && itemHasChildren(currentState(), item.id)) { toggleExpanded(item); return; }
+  if (zone === GESTURE_ZONES.body && context === 'tree' && itemHasChildren(currentState(), item.id)) { toggleExpanded(item); return; }
+  toggleQuickActions(item.id);
+}
+
+function itemHasChildren(state, itemId) { return childrenOf(state, itemId, renderIndex(state)).length > 0; }
+
+function handleGestureRename({ row }) {
+  const category = rowCategory(row);
+  if (category) { openCategoryRename(category); return; }
+  const item = rowItem(row);
+  if (item) {
+    if (itemHasConflict(currentState(), item.id)) blockConflictedEdit();
+    else openRenameItem(item);
+  }
+}
+
+function handleGestureSwipe({ row, direction }) {
+  const item = rowItem(row);
+  if (!item) return;
+  if (itemHasConflict(currentState(), item.id)) { blockConflictedEdit(); return; }
+  if (direction === 'left') void performStatus(item, item.status === 'completed' ? 'active' : 'completed');
+  else void performDelete(item);
+}
+
+function markDragSource(sourceId, category = false, active = true) {
+  if (!sourceId) return;
+  const selector = category ? `.category-nav-row[data-category-id="${CSS.escape(sourceId)}"]` : `.item-row[data-item-id="${CSS.escape(sourceId)}"]`;
+  root?.querySelector(selector)?.classList.toggle(category ? 'category-dragging' : 'dragging', active);
+}
+
+function resolveDragTarget({ row, session, x, y }) {
+  const target = /** @type {HTMLElement|null} */ (document.elementFromPoint(x, y)?.closest?.('.item-row, .category-nav-row'));
+  if (!target || target === row) return null;
+  if (target.classList.contains('category-nav-row') !== row.classList.contains('category-nav-row')) return null;
+  if (target.classList.contains('category-nav-row')) return { id: target.dataset.categoryId, allowed: true, row: target };
+  const source = getItem(currentState(), session.sourceId, renderIndex(currentState()));
+  const targetItem = getItem(currentState(), target.dataset.itemId, renderIndex(currentState()));
+  const mode = session.smartView ? 'smart' : 'tree';
+  const validation = validateReorderTarget({ source: source && { ...source, conflicted: itemHasConflict(currentState(), source.id) }, target: targetItem && { ...targetItem, conflicted: itemHasConflict(currentState(), targetItem.id) }, mode });
+  const smartItems = mode === 'smart' ? smartViewItems(currentState(), session.smartView) : [];
+  const smartAllowed = mode !== 'smart' || (source?.status === targetItem?.status && smartItems.some((candidate) => candidate.id === source?.id) && smartItems.some((candidate) => candidate.id === targetItem?.id));
+  return { id: targetItem?.id ?? null, allowed: validation.ok && smartAllowed, row: target };
+}
+
+function handleDragStart({ row, session }) {
+  const category = rowCategory(row);
+  if (category) {
+    session.sourceId = category.id;
+    ui.dragCategoryId = category.id;
+    markDragSource(category.id, true);
+    return true;
+  }
+  const item = rowItem(row);
+  if (!item || itemHasConflict(currentState(), item.id)) { if (item) blockConflictedEdit(); return false; }
+  session.sourceId = item.id;
+  session.smartView = row.dataset.gestureContext === 'smart' ? ui.smartView : null;
+  ui.dragItemId = item.id;
+  markDragSource(item.id);
+  return true;
+}
+
+function handleDragTarget({ target }) {
+  ui.dragTargetId = target?.allowed ? target.id ?? null : null;
+}
+
+function handleDragEnd({ row, session, target }) {
+  const sourceId = session.sourceId;
+  const targetId = target?.allowed ? target.id : null;
+  const category = rowCategory(row);
+  ui.dragItemId = null; ui.dragCategoryId = null; ui.dragTargetId = null;
+  markDragSource(sourceId, Boolean(category), false);
+  if (!sourceId || !targetId || sourceId === targetId) return;
+  if (category) {
+    const targetCategory = getCategory(currentState(), targetId, renderIndex(currentState()));
+    if (!targetCategory) return;
+    void mutate('category_reorder', (draft) => reorderCategories(draft, sourceId, targetId), 'categoryReordered');
+    return;
+  }
+  const state = currentState();
+  const source = getItem(state, sourceId, renderIndex(state));
+  const destination = getItem(state, targetId, renderIndex(state));
+  const mode = session.smartView ? 'smart' : 'tree';
+  const validation = validateReorderTarget({ source: source && { ...source, conflicted: itemHasConflict(state, sourceId) }, target: destination && { ...destination, conflicted: itemHasConflict(state, targetId) }, mode });
+  const smartItems = mode === 'smart' ? smartViewItems(state, session.smartView) : [];
+  const smartAllowed = mode !== 'smart' || (source?.status === destination?.status && smartItems.some((candidate) => candidate.id === source?.id) && smartItems.some((candidate) => candidate.id === destination?.id));
+  if (!validation.ok || !smartAllowed) { if (validation.reason === 'conflict') blockConflictedEdit(); return; }
+  if (mode === 'smart') void mutate('smart_reorder', (draft) => reorderSmartView(draft, session.smartView, sourceId, targetId), 'itemOrderSaved');
+  else void mutate('reorder_siblings', (draft) => reorderSiblings(draft, sourceId, targetId), 'itemOrderSaved');
+}
+
+function installGestureController() {
+  gestureController?.dispose();
+  gestureController = createGestureController(root, {
+    getPolicy: ({ row, zone, event }) => rowPolicy(row, zone, event),
+    getRowKey: (row) => row.dataset.itemId ? `item:${row.dataset.itemId}` : row.dataset.categoryId ? `category:${row.dataset.categoryId}` : null,
+    onOutsidePointerDown: ({ event }) => {
+      if (!ui.quickActionId) return;
+      const insideQuick = (/** @type {Element|null} */ (event.target))?.closest?.('.quick-action-row, .quick-actions-trigger');
+      if (!insideQuick) { ui.quickActionId = null; ui.addChildFor = null; scheduleRender(); }
+    },
+    onTap: handleGestureTap,
+    onRename: handleGestureRename,
+    onSwipeVisual: ({ row, phase, dx, direction }) => {
+      if (phase === 'end') {
+        row.classList.remove('is-swiping', 'swipe-left', 'swipe-right');
+        row.style.removeProperty('--swipe-x');
+        row.classList.add('swipe-reset');
+        requestAnimationFrame(() => row.classList.remove('swipe-reset'));
+        return;
+      }
+      row.classList.add('is-swiping');
+      row.classList.toggle('swipe-left', direction === 'left');
+      row.classList.toggle('swipe-right', direction === 'right');
+      row.style.setProperty('--swipe-x', `${dx ?? 0}px`);
+    },
+    onSwipe: handleGestureSwipe,
+    onDragStart: handleDragStart,
+    resolveDragTarget,
+    onDragTarget: handleDragTarget,
+    onDragEnd: handleDragEnd,
+    onCancel: ({ row, session }) => { ui.dragItemId = null; ui.dragCategoryId = null; ui.dragTargetId = null; markDragSource(session.sourceId, row.classList.contains('category-nav-row'), false); },
+    getScrollContainer: ({ row }) => /** @type {HTMLElement|null} */ (row.closest('.virtual-viewport, .today-list, .category-list') ?? document.scrollingElement),
+  });
+}
+
 function handleKeyboardShortcuts(event) {
   if (event.key === 'Escape') {
+    if (ui.quickActionId || ui.addChildFor) { clearTransientInteractionState({ preserveSelection: true }); scheduleRender(); return; }
     if (ui.modal || ui.detailId) { ui.modal = null; ui.detailId = null; scheduleRender(); }
     return;
   }
@@ -284,68 +346,11 @@ function handleKeyboardShortcuts(event) {
   else if (event.key === '/') { event.preventDefault(); (/** @type {HTMLInputElement|null} */ (document.querySelector('.global-search')))?.focus(); }
   else if (event.key.toLowerCase() === 'n' && ui.page === 'categories') { event.preventDefault(); (/** @type {HTMLInputElement|null} */ (document.querySelector('.quick-create-input')))?.focus(); }
 }
-function swipeHandler(element, item) {
-  let startX = 0; let startY = 0; let active = false;
-  let horizontal = false;
-  let suppressClick = false;
-  const clearVisual = () => {
-    element.classList.remove('is-swiping', 'swipe-left', 'swipe-right');
-    element.classList.add('swipe-reset');
-    element.style.removeProperty('--swipe-x');
-    requestAnimationFrame(() => element.classList.remove('swipe-reset'));
-  };
-  const updateVisual = (dx) => {
-    const direction = swipeDirection(dx);
-    element.classList.toggle('swipe-left', direction === 'left');
-    element.classList.toggle('swipe-right', direction === 'right');
-    element.style.setProperty('--swipe-x', `${swipeOffset(dx)}px`);
-    element.classList.add('is-swiping');
-  };
-  element.addEventListener('click', (event) => {
-    if (!suppressClick) return;
-    suppressClick = false;
-    event.preventDefault();
-    event.stopPropagation();
-  }, true);
-  element.addEventListener('pointerdown', (event) => {
-    if (event.pointerType === 'mouse' || event.clientX < SWIPE_CONFIG.edgeGuard || event.clientX > window.innerWidth - SWIPE_CONFIG.edgeGuard) return;
-    if (event.target.closest('button, input, select, textarea')) return;
-    startX = event.clientX; startY = event.clientY; active = true; horizontal = false;
-    clearVisual();
-  });
-  element.addEventListener('pointermove', (event) => {
-    if (!active) return;
-    const dx = event.clientX - startX;
-    const dy = event.clientY - startY;
-    if (!horizontal) {
-      const axis = classifySwipeAxis(dx, dy);
-      if (axis === 'vertical') { active = false; return; }
-      if (axis !== 'horizontal') return;
-      horizontal = true;
-      try { element.setPointerCapture?.(event.pointerId); } catch { /* pointer capture is best effort in embedded webviews */ }
-    }
-    event.preventDefault();
-    updateVisual(dx);
-  });
-  element.addEventListener('pointerup', (event) => {
-    if (!active) return;
-    active = false;
-    if (!horizontal) { clearVisual(); return; }
-    const dx = event.clientX - startX;
-    const dy = event.clientY - startY;
-    suppressClick = true;
-    if (!shouldTriggerSwipe(dx, dy)) { clearVisual(); return; }
-    if (itemHasConflict(currentState(), item.id)) { clearVisual(); blockConflictedEdit(); return; }
-    clearVisual();
-    if (dx < 0) performStatus(item, item.status === 'completed' ? 'active' : 'completed');
-    else performDelete(item);
-  });
-  element.addEventListener('pointercancel', () => { active = false; horizontal = false; clearVisual(); });
-}
 
 function categoryDepthLimit() { return Math.max(2, Math.floor((window.innerWidth - (window.innerWidth < 720 ? 32 : 360)) / 145)); }
 
 function setPage(page, value = null) {
+  clearTransientInteractionState({ preserveSelection: page === 'today' });
   ui.page = page;
   if (page === 'categories' && value) { ui.categoryId = value; ui.focusRoot = null; }
   if (page === 'smart' && value) ui.smartView = value;
@@ -466,12 +471,12 @@ function renderCategoryNav(state, category) {
   const index = renderIndex(state);
   const active = ui.page === 'categories' && (ui.categoryId ?? state.settings.defaultCategoryId ?? state.categories[0]?.id) === category.id;
   const itemCount = index.itemsByCategory.get(category.id)?.length ?? 0;
-  const row = node('div', { class: `category-nav-row ${active ? 'active' : ''}`, draggable: 'true', dataset: { categoryId: category.id }, onDragstart: (event) => { ui.dragCategoryId = category.id; event.dataTransfer.effectAllowed = 'move'; }, onDragover: (event) => event.preventDefault(), onDrop: (event) => { event.preventDefault(); if (ui.dragCategoryId && ui.dragCategoryId !== category.id) mutate('category_reorder', (draft) => reorderCategories(draft, ui.dragCategoryId, category.id), 'categoryReordered'); } });
-  const handle = node('button', { class: 'category-drag-handle', type: 'button', draggable: 'true', ariaLabel: tr('categoryDrag'), title: tr('categoryDrag'), onDragstart: (event) => { ui.dragCategoryId = category.id; event.dataTransfer.effectAllowed = 'move'; } }, '⠿');
-  bindPointerCategoryReorder(handle, row, category);
-  const title = node('button', { class: 'category-nav-title', type: 'button', onClick: () => setPage('categories', category.id) }, node('span', { class: 'category-dot' }, '•'), node('span', {}, category.title), node('small', {}, String(itemCount)));
-  bindLongPress(title, () => openCategoryRename(category), { duration: 700 });
-  row.append(handle, title, iconButton('⋮', tr('more'), (event) => { stop(event); openCategoryMenu(category); }));
+  const row = node('div', { class: `category-nav-row ${active ? 'active' : ''}`, dataset: { categoryId: category.id, gestureRow: 'category', gestureContext: 'category' } });
+  const handle = node('button', { class: 'category-drag-handle', type: 'button', ariaLabel: tr('categoryDrag'), title: tr('categoryDrag'), 'data-gesture-zone': GESTURE_ZONES.handle }, '⠿');
+  const title = node('button', { class: 'category-nav-title', type: 'button', 'data-gesture-zone': GESTURE_ZONES.title, onClick: () => setPage('categories', category.id) }, node('span', { class: 'category-dot' }, '•'), node('span', {}, category.title), node('small', {}, String(itemCount)));
+  const more = iconButton('⋮', tr('more'), (event) => { stop(event); openCategoryMenu(category); }, { className: 'category-more' });
+  more.dataset.gestureZone = GESTURE_ZONES.control;
+  row.append(handle, title, more);
   return row;
 }
 
@@ -615,6 +620,7 @@ function renderTreeList(state, category) {
         siblingIndex: entry.siblingIndex,
         siblingCount: entry.siblingCount,
         tree: true,
+        interactionContext: 'tree',
       }),
     empty: () => renderEmptyState('noItems', 'addItem', () => (/** @type {HTMLInputElement|null} */ (document.querySelector('.quick-create-input')))?.focus()),
   });
@@ -630,21 +636,21 @@ function renderSearchResults(state) {
   if (!results.length) return node('div', { class: 'search-results' }, renderEmptyState('noResults', 'clearFilter', () => { ui.search = ''; scheduleRender(); }));
   const holder = node('div', { class: 'search-list-holder' });
   activeVirtualList?.destroy();
-  activeVirtualList = new VirtualList(holder, { rowHeight: 116, overscan: 10, renderRow: (item) => renderItemRow(state, item, { depth: 0, tree: false, pathContext: true }), empty: () => renderEmptyState('noResults') });
+  activeVirtualList = new VirtualList(holder, { rowHeight: 116, overscan: 10, renderRow: (item) => renderItemRow(state, item, { depth: 0, tree: false, pathContext: true, interactionContext: 'search' }), empty: () => renderEmptyState('noResults') });
   activeVirtualList.setItems(results);
   section.append(holder); return section;
 }
 
 function renderEmptyState(messageKey, actionKey = null, action = null) { return node('div', { class: 'empty-state' }, node('div', { class: 'empty-orbit' }, '◌'), heading(tr(messageKey), 2), node('p', {}, tr(`${messageKey}Hint`) === `${messageKey}Hint` ? '' : tr(`${messageKey}Hint`)), actionKey && action ? button(tr(actionKey), action, { className: 'primary-button' }) : null); }
 
-function renderItemRow(state, item, { depth = 0, sourceDepth = depth, maxDepth = 2, tree = true, pathContext = false, smartView = null, siblingIndex = 0, siblingCount = 1, nextDepth = null } = {}) {
+function renderItemRow(state, item, { depth = 0, sourceDepth = depth, maxDepth = 2, tree = true, pathContext = false, smartView = null, siblingIndex = 0, siblingCount = 1, nextDepth = null, interactionContext = tree ? 'tree' : 'context' } = {}) {
   const index = renderIndex(state);
   const childItems = childrenOf(state, item.id, index);
   const isParent = childItems.length > 0;
   const semantics = treeRowSemantics({ childCount: childItems.length, depth, sourceDepth, maxDepth, tree, pathContext, smartView, siblingIndex, siblingCount, nextDepth });
   const showRing = semantics.hasProgressRing;
   const progressResult = progressResultForItem(state, item.id, index.progressResultByItem, new Set(), index);
-  const progress = formatProgress(progressResult.raw, progressResult.complete);
+  const progress = progressPresentation(progressResult);
   const due = effectiveDue(state, item.id, index);
   const dueText = due.value ? relativeDueText(language(), due.value) : tr('noDeadline');
   const dueDate = due.value ? new Date(due.value) : null;
@@ -657,6 +663,8 @@ function renderItemRow(state, item, { depth = 0, sourceDepth = depth, maxDepth =
     style: { '--priority-color': priorityColor(item.priority), '--depth': String(semantics.depth) },
     dataset: {
       itemId: item.id,
+      gestureRow: 'item',
+      gestureContext: interactionContext,
       tree: String(semantics.isTreeRow),
       depth: String(semantics.depth),
       sourceDepth: String(semantics.sourceDepth),
@@ -668,34 +676,33 @@ function renderItemRow(state, item, { depth = 0, sourceDepth = depth, maxDepth =
       nextDepth: semantics.nextDepth === null ? '' : String(semantics.nextDepth),
       treeSpacing: semantics.spacing,
     },
-    draggable: 'false',
     onContextmenu: (event) => { stop(event); if (conflict) blockConflictedEdit(); else openItemMenu(item); },
-    onDragover: (event) => { event.preventDefault(); row.classList.add('drag-target'); },
-    onDragleave: () => row.classList.remove('drag-target'),
-    onDrop: (event) => { event.preventDefault(); row.classList.remove('drag-target'); if (itemHasConflict(currentState(), item.id) || itemHasConflict(currentState(), ui.dragItemId)) { blockConflictedEdit(); return; } if (ui.dragItemId && ui.dragItemId !== item.id) { if (smartView) mutate('smart_reorder', (draft) => reorderSmartView(draft, smartView, ui.dragItemId, item.id), 'itemOrderSaved'); else mutate('reorder_siblings', (draft) => reorderSiblings(draft, ui.dragItemId, item.id), 'itemOrderSaved'); } },
   });
-  const handle = node('button', { class: 'drag-handle', type: 'button', draggable: 'true', ariaLabel: tr('longPressDrag'), title: tr('longPressDrag'), onDragstart: (event) => { ui.dragItemId = item.id; event.dataTransfer.effectAllowed = 'move'; }, onDragend: () => { ui.dragItemId = null; } }, '⠿');
-  bindPointerReorder(handle, row, item, smartView);
+  const handle = node('button', { class: 'drag-handle', type: 'button', 'data-gesture-zone': GESTURE_ZONES.handle, ariaLabel: tr('longPressDrag'), title: tr('longPressDrag') }, '⠿');
   const nextStatus = item.status === 'completed' ? 'active' : item.status === 'skipped' ? 'active' : 'completed';
   const statusButton = button(item.status === 'completed' ? '✓' : item.status === 'skipped' ? '–' : '○', () => conflict ? blockConflictedEdit() : performStatus(item, nextStatus), { className: `status-button ${item.status}`, ariaLabel: item.status === 'completed' ? tr('reopen') : item.status === 'skipped' ? tr('unskip') : tr('complete'), title: item.status === 'completed' ? tr('reopen') : item.status === 'skipped' ? tr('unskip') : tr('complete') });
-  const ring = node('span', { class: 'progress-ring', style: { '--progress': `${progress}%` }, ariaLabel: tr('progressPercent', { value: progress }) }, node('span', {}, `${Math.round(progress)}%`));
-  const title = node('button', { type: 'button', class: 'item-title', onClick: () => { if (pathContext) focusItem(item); else if (isParent) toggleExpanded(item); else toggleQuickActions(item.id); } }, item.title);
-  bindLongPress(title, () => conflict ? blockConflictedEdit() : openRenameItem(item), { duration: 700 });
+  statusButton.dataset.gestureZone = GESTURE_ZONES.control;
+  const ring = node('span', { class: 'progress-ring', style: { '--progress': `${progress.numeric}%` }, ariaLabel: tr('progressPercent', { value: progress.numeric }) }, node('span', {}, progress.label));
+  const title = node('button', { type: 'button', class: 'item-title', 'data-gesture-zone': GESTURE_ZONES.title, onClick: () => { if (pathContext) focusItem(item); else if (isParent) toggleExpanded(item); else toggleQuickActions(item.id); } }, item.title);
   const titleLine = node('div', { class: 'item-title-line' }, title, item.importance ? node('span', { class: 'importance-stars', title: tr('importance') }, '★'.repeat(item.importance)) : null, reminders.length ? node('span', { class: 'reminder-symbol', title: tr('reminder'), ariaLabel: tr('reminder') }, '⌁') : null, conflict ? node('span', { class: 'conflict-indicator', title: tr('syncConflict'), ariaLabel: tr('syncConflict') }, '⚠') : null);
   const path = pathContext ? node('span', { class: 'item-path-context' }, pathString(state, item.id, index)) : null;
   const meta = node('div', { class: `item-meta ${pathContext ? 'with-path' : ''}` }, node('span', { class: `due-text ${overdue ? 'overdue' : isToday ? 'today' : ''}`, title: due.source === 'inherited' ? tr('inherited') : due.source === 'explicit' ? tr('explicit') : tr('noDeadline') }, dueText), item.tags.length ? node('span', { class: 'tag-count' }, `#${item.tags.length}`) : null, path);
   const info = node('div', { class: 'item-main' }, titleLine, meta);
   const chevron = iconButton('›', tr('detail'), () => openDetail(item.id), { className: 'detail-chevron' });
-  const main = node('div', { class: `item-row-main ${showRing ? 'parent' : 'leaf'} ${semantics.isTreeRow ? 'tree-row-main' : ''}`, onClick: (event) => { if (event.target.closest('button, input')) return; toggleQuickActions(item.id); } }, handle, showRing ? ring : statusButton, info, chevron);
-  const actionRow = node('div', { class: 'item-actions' }, button(item.status === 'completed' ? tr('reopen') : item.status === 'skipped' ? tr('unskip') : tr('complete'), () => conflict ? blockConflictedEdit() : performStatus(item, nextStatus), { className: 'row-action', icon: item.status === 'completed' ? '↺' : '✓' }), button(tr('addChild'), () => conflict ? blockConflictedEdit() : (ui.quickActionId = item.id, ui.addChildFor = item.id, scheduleRender()), { className: 'row-action', icon: '+' }), button(state.today.items[item.id] ? tr('removeFromToday') : tr('moveToToday'), () => conflict ? blockConflictedEdit() : toggleToday(item), { className: 'row-action', icon: '◷' }), iconButton('⋯', tr('more'), (event) => { stop(event); if (conflict) blockConflictedEdit(); else openItemMenu(item); }, { className: 'row-action-more' }));
-  row.append(main, actionRow);
+  chevron.dataset.gestureZone = GESTURE_ZONES.control;
+  const quickTrigger = isParent ? iconButton('⋯', tr('more'), (event) => { stop(event); if (conflict) blockConflictedEdit(); else toggleQuickActions(item.id); }, { className: 'quick-actions-trigger' }) : null;
+  if (quickTrigger) { quickTrigger.dataset.gestureZone = GESTURE_ZONES.control; quickTrigger.dataset.action = 'quick-actions'; }
+  const endControls = node('div', { class: 'row-end-controls', 'data-gesture-zone': GESTURE_ZONES.body }, quickTrigger, chevron);
+  const main = node('div', { class: `item-row-main ${showRing ? 'parent' : 'leaf'} ${semantics.isTreeRow ? 'tree-row-main' : ''}`, 'data-gesture-zone': GESTURE_ZONES.body }, handle, showRing ? ring : statusButton, info, endControls);
+  const actionRow = node('div', { class: 'item-actions', 'data-gesture-zone': GESTURE_ZONES.control }, button(item.status === 'completed' ? tr('reopen') : item.status === 'skipped' ? tr('unskip') : tr('complete'), () => conflict ? blockConflictedEdit() : performStatus(item, nextStatus), { className: 'row-action', icon: item.status === 'completed' ? '↺' : '✓' }), button(tr('addChild'), () => conflict ? blockConflictedEdit() : (ui.quickActionId = item.id, ui.addChildFor = item.id, scheduleRender()), { className: 'row-action', icon: '+' }), button(state.today.items[item.id] ? tr('removeFromToday') : tr('moveToToday'), () => conflict ? blockConflictedEdit() : toggleToday(item), { className: 'row-action', icon: '◷' }), iconButton('⋯', tr('more'), (event) => { stop(event); if (conflict) blockConflictedEdit(); else openItemMenu(item); }, { className: 'row-action-more' }));
+  const swipeBackground = node('div', { class: 'swipe-action-background', 'aria-hidden': 'true' }, node('span', { class: 'swipe-action-left' }, item.status === 'completed' ? tr('reopen') : tr('complete')), node('span', { class: 'swipe-action-right' }, tr('delete')));
+  row.append(swipeBackground, main, actionRow);
   if (ui.quickActionId === item.id) row.append(renderQuickActionRow(state, item));
-  swipeHandler(row, item);
   return row;
 }
 
 function renderQuickActionRow(state, item) {
-  const row = node('div', { class: 'quick-action-row' }, node('span', { class: 'quick-action-label' }, tr('more')), button(tr('addChild'), () => itemHasConflict(state, item.id) ? blockConflictedEdit() : openChildCreate(item), { className: 'quick-action-button' }), button(state.today.items[item.id] ? tr('removeFromToday') : tr('moveToToday'), () => itemHasConflict(state, item.id) ? blockConflictedEdit() : toggleToday(item), { className: 'quick-action-button' }), node('label', { class: 'quick-priority' }, tr('priority'), node('select', { value: item.priority, ariaLabel: tr('priority'), onChange: (event) => itemHasConflict(currentState(), item.id) ? blockConflictedEdit() : mutate('priority_changed', (draft) => setPriority(draft, item.id, event.target.value) , 'priorityChanged') }, ...['none', 'low', 'medium', 'high'].map((value) => node('option', { value }, priorityLabel(value))))), button(tr('close'), () => { ui.quickActionId = null; scheduleRender(); }, { className: 'quick-action-button' }));
+  const row = node('div', { class: 'quick-action-row', 'data-gesture-zone': GESTURE_ZONES.control }, node('span', { class: 'quick-action-label' }, tr('more')), button(tr('addChild'), () => itemHasConflict(state, item.id) ? blockConflictedEdit() : openChildCreate(item), { className: 'quick-action-button' }), button(state.today.items[item.id] ? tr('removeFromToday') : tr('moveToToday'), () => itemHasConflict(state, item.id) ? blockConflictedEdit() : toggleToday(item), { className: 'quick-action-button' }), node('label', { class: 'quick-priority' }, tr('priority'), node('select', { value: item.priority, ariaLabel: tr('priority'), onChange: (event) => itemHasConflict(currentState(), item.id) ? blockConflictedEdit() : mutate('priority_changed', (draft) => setPriority(draft, item.id, event.target.value) , 'priorityChanged') }, ...['none', 'low', 'medium', 'high'].map((value) => node('option', { value }, priorityLabel(value))))), button(tr('close'), () => { ui.quickActionId = null; ui.addChildFor = null; scheduleRender(); }, { className: 'quick-action-button' }));
   return row;
 }
 
@@ -804,9 +811,10 @@ function overdueGroups(state, items) {
 }
 
 function renderTodayRow(state, item) {
-  const row = renderItemRow(state, item, { depth: 0, tree: false, pathContext: true });
+  const row = renderItemRow(state, item, { depth: 0, tree: false, pathContext: true, interactionContext: 'today' });
   const selected = ui.selectedToday?.has(item.id);
   const checkbox = node('input', { class: 'bulk-checkbox', type: 'checkbox', checked: selected, ariaLabel: item.title, onChange: (event) => { ui.selectedToday ??= new Set(); if (event.target.checked) ui.selectedToday.add(item.id); else ui.selectedToday.delete(item.id); scheduleRender(); } });
+  checkbox.dataset.gestureZone = GESTURE_ZONES.control;
   const main = row.querySelector('.item-row-main');
   main?.classList.add('has-bulk-checkbox');
   main?.prepend(checkbox);
@@ -837,12 +845,12 @@ async function batchTodayConfirmed(ids, action) {
 function renderSmartPage(state) {
   const page = node('section', { class: 'page smart-page' });
   if (state.settings.experimental?.enabled === false || state.settings.experimental?.smart === false) {
-    page.append(node('div', { class: 'page-header' }, node('div', { class: 'page-header-main' }, node('span', { class: 'eyebrow' }, tr('navSmart')), heading(tr('navSmart'), 1)), button(tr('settingsExperimental'), () => { ui.page = 'settings'; ui.settingsPage = 'experimental'; scheduleRender(); }, { className: 'secondary-button' })), settingCard(tr('settingsExperimental'), node('p', { class: 'muted' }, tr('smartDisabled'))));
+    page.append(node('div', { class: 'page-header' }, node('div', { class: 'page-header-main' }, node('span', { class: 'eyebrow' }, tr('navSmart')), heading(tr('navSmart'), 1)), button(tr('settingsExperimental'), () => { setPage('settings'); ui.settingsPage = 'experimental'; scheduleRender(); }, { className: 'secondary-button' })), settingCard(tr('settingsExperimental'), node('p', { class: 'muted' }, tr('smartDisabled'))));
     return page;
   }
   const views = ['today', 'upcoming', 'overdue', 'recentlyCompleted', 'readyToClose', 'recentlyActive', 'highAttention', 'stale', 'momentum', 'estimated', 'routine'];
   const viewNav = node('div', { class: 'smart-view-nav' });
-  for (const view of views) viewNav.append(button(tr(`view${view[0].toUpperCase()}${view.slice(1)}`), () => { ui.smartView = view; ui.page = 'smart'; scheduleRender(); }, { className: `smart-view-button ${ui.smartView === view ? 'active' : ''}` }));
+  for (const view of views) viewNav.append(button(tr(`view${view[0].toUpperCase()}${view.slice(1)}`), () => setPage('smart', view), { className: `smart-view-button ${ui.smartView === view ? 'active' : ''}` }));
   const items = smartViewItems(state, ui.smartView, renderNow, renderIndex(state));
   const activeItems = items.filter((item) => item.status !== 'completed');
   const completedItems = items.filter((item) => item.status === 'completed');
@@ -863,7 +871,7 @@ function smartDescription(view) {
 
 function renderSmartRow(state, item, view) {
   const index = renderIndex(state);
-  const row = renderItemRow(state, item, { depth: 0, tree: false, pathContext: true, smartView: view });
+  const row = renderItemRow(state, item, { depth: 0, tree: false, pathContext: true, smartView: view, interactionContext: 'smart' });
   const badges = node('div', { class: 'smart-badges' });
   if (view === 'highAttention') badges.append(node('span', { class: 'metric-badge' }, `${tr('attention')} ${attentionScore(state, item.id, renderNow, index).toFixed(1)}`));
   if (view === 'momentum') badges.append(node('span', { class: 'metric-badge' }, `${tr('momentum')} ${momentumScore(state, item.id, renderNow, index).toFixed(1)}`));
@@ -877,7 +885,7 @@ function renderSmartRow(state, item, view) {
 function renderReminderPage(state) {
   const page = node('section', { class: 'page reminder-page' });
   const groups = reminderCenter(state, renderNow, renderIndex(state));
-  page.append(node('div', { class: 'page-header' }, node('div', { class: 'page-header-main' }, node('span', { class: 'eyebrow' }, tr('navReminders')), heading(tr('navReminders'), 1), node('p', { class: 'page-subtitle' }, tr('missedReminder'))), node('div', { class: 'page-header-actions' }, button(tr('exportCalendar'), exportCalendar, { className: 'secondary-button', icon: '⇩' }), button(tr('settingsReminders'), () => { ui.page = 'settings'; ui.settingsPage = 'reminders'; scheduleRender(); }, { className: 'secondary-button', icon: '⚙' }))));
+  page.append(node('div', { class: 'page-header' }, node('div', { class: 'page-header-main' }, node('span', { class: 'eyebrow' }, tr('navReminders')), heading(tr('navReminders'), 1), node('p', { class: 'page-subtitle' }, tr('missedReminder'))), node('div', { class: 'page-header-actions' }, button(tr('exportCalendar'), exportCalendar, { className: 'secondary-button', icon: '⇩' }), button(tr('settingsReminders'), () => { setPage('settings'); ui.settingsPage = 'reminders'; scheduleRender(); }, { className: 'secondary-button', icon: '⚙' }))));
   page.append(reminderGroup(state, tr('remindersNeedAction'), groups.needAction, 'needAction'), reminderGroup(state, tr('remindersToday'), groups.today, 'today'), reminderGroup(state, tr('remindersLater'), groups.later, 'later'), reminderGroup(state, tr('remindersHandled'), groups.handled, 'handled'));
   return page;
 }
@@ -937,7 +945,7 @@ function renderDetailPanel(state, item) {
   const index = renderIndex(state);
   const due = effectiveDue(state, item.id, index);
   const progressResult = progressResultForItem(state, item.id, index.progressResultByItem, new Set(), index);
-  const progress = formatProgress(progressResult.raw, progressResult.complete);
+  const progress = progressPresentation(progressResult);
   const lockedByConflict = itemHasConflict(state, item.id);
   const panel = node('aside', { class: 'detail-pane', role: 'dialog', 'aria-label': tr('detail') });
   const header = node('div', { class: 'detail-header' }, node('div', { class: 'detail-heading' }, node('span', { class: 'eyebrow' }, tr('detail')), heading(item.title, 2)), iconButton('×', tr('closePanel'), () => { ui.detailId = null; scheduleRender(); }));
@@ -946,7 +954,7 @@ function renderDetailPanel(state, item) {
   const editable = node('div', { class: lockedByConflict ? 'conflict-edit-locked' : '' });
   const titleInput = node('input', { class: 'detail-title-input', type: 'text', value: item.title, ariaLabel: tr('itemTitle'), onChange: (event) => mutate('edit_title', (draft) => renameItem(draft, item.id, event.target.value), 'savedOffline') });
   editable.append(inputField(tr('itemTitle'), titleInput));
-  const progressCard = node('div', { class: 'detail-progress-card' }, node('div', { class: 'detail-progress-ring progress-ring', style: { '--progress': `${progress}%` } }, node('span', {}, `${Math.round(progress)}%`)), node('div', {}, node('strong', {}, tr('progress')), node('small', {}, tr('iconRing'))));
+  const progressCard = node('div', { class: 'detail-progress-card' }, node('div', { class: 'detail-progress-ring progress-ring', style: { '--progress': `${progress.numeric}%` }, ariaLabel: tr('progressPercent', { value: progress.numeric }) }, node('span', {}, progress.label)), node('div', {}, node('strong', {}, tr('progress')), node('small', {}, tr('iconRing'))));
   const conflictSection = renderConflictSection(state, item);
   if (conflictSection) content.append(conflictSection);
   const basicGrid = node('div', { class: 'detail-grid' });
@@ -1008,6 +1016,7 @@ export async function mountApp(repo) {
     }
   }
   initialised = true;
+  installGestureController();
   render();
   if (!state.meta.recoveryMode && state.settings.cloudSync?.authorized) scheduleCloudSync(250);
   if (!state.meta.recoveryMode && state.settings.developerEnabled) await repository.update('performance_tti', (draft) => { recordPerformance(draft, 'time_to_interactive', performance.now() - startupStartedAt, { itemCount: draft.items.length }); return { ok: true }; }, null, { queue: false });
@@ -1108,6 +1117,7 @@ function renderChildrenField(state, item) {
     siblingIndex: childIndex,
     siblingCount: children.length,
     tree: true,
+    interactionContext: 'detail',
   })));
   return section;
 }
@@ -1628,6 +1638,7 @@ async function loadDatasetChoice(choice) {
 }
 
 async function switchToRemoteDataset(remote, remoteFile = null, riskAccepted = false) {
+  clearTransientInteractionState();
   const current = clone(currentState());
   const incoming = clone(remote);
   incoming.meta.accountId = current.settings.cloudSync?.accountId ?? incoming.meta.accountId ?? null;
@@ -1686,6 +1697,7 @@ async function pushCloud(state) {
 
 async function applySyncMerge(merge, remoteFile = null, { automatic = false } = {}) {
   if (!merge?.state) return;
+  clearTransientInteractionState();
   const state = clone(merge.state);
   if (state.settings.cloudSync?.accountId && state.meta.accountId !== state.settings.cloudSync.accountId) state.meta.accountId = state.settings.cloudSync.accountId;
   const result = await repository.replaceState(state, 'sync_merge');
@@ -1855,6 +1867,7 @@ function renderSnapshotRestoreModal(content, modal) {
 }
 
 async function confirmSnapshotRestore(restoredState) {
+  clearTransientInteractionState();
   const safety = await repository.createSafetySnapshot('manual_migration_restore');
   if (!safety.ok) { toast(tr('errorGeneric'), 'error'); return; }
   const restored = clone(restoredState);
@@ -1865,7 +1878,7 @@ async function confirmSnapshotRestore(restoredState) {
 }
 
 function renderDangerousDataCard() { return settingCard(tr('dangerousOperations'), node('p', { class: 'field-hint' }, tr('dangerousHint')), button(tr('clearLocal'), () => openConfirm({ title: tr('clearLocal'), message: tr('confirmClearData'), danger: true, typed: true, onConfirm: clearAllLocalData }), { className: 'danger-button' })); }
-async function clearAllLocalData() { const result = await repository.replaceState(makeEmptyState(), 'clear_local_data'); if (result.ok) { ui.modal = null; ui.categoryId = null; ui.detailId = null; toast(tr('savedOffline')); } }
+async function clearAllLocalData() { clearTransientInteractionState(); const result = await repository.replaceState(makeEmptyState(), 'clear_local_data'); if (result.ok) { ui.modal = null; ui.categoryId = null; ui.detailId = null; toast(tr('savedOffline')); } }
 
 function renderIconGuide() {
   const entries = [['○', 'iconActive'], ['✓', 'iconCompleted'], ['◉', 'iconRing'], ['★★', 'iconImportance'], ['▏', 'iconPriority'], ['›', 'iconChevron'], ['⠿', 'iconDrag'], ['⋯', 'iconMore'], ['⌁', 'iconReminder'], ['⚠', 'iconSync']];
@@ -1948,6 +1961,7 @@ function renderRecoveryMode(state) {
   const error = repository?.lastError;
   const context = state.meta.recoveryContext ?? {};
   const retry = async () => {
+    clearTransientInteractionState();
     const result = await repository.retryRecovery();
     toast(tr(result.ok ? 'recoveryRetrySuccess' : 'recoveryRetryFailed'), result.ok ? 'success' : 'error');
     if (result.ok) ui.page = currentState().settings.defaultPage ?? 'categories';
@@ -2107,6 +2121,7 @@ function renderConflictArchiveRestoreModal(content, modal) {
 }
 
 async function confirmFullRestore(preview) {
+  clearTransientInteractionState();
   const safety = await repository.createSafetySnapshot('full_restore');
   if (!safety.ok) { toast(tr('errorGeneric'), 'error'); return; }
   const incoming = clone(preview.incoming);
