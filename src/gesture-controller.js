@@ -54,7 +54,7 @@ export function createGestureController(root, options = {}) {
   }
   function isEdgeGuarded(event, policy) {
     if (!policy.allowSwipe || typeof window === 'undefined') return false;
-    return event.clientX < config.edgeGuard || event.clientX > window.innerWidth - config.edgeGuard;
+    return event.clientX <= config.edgeGuard || event.clientX >= window.innerWidth - config.edgeGuard;
   }
   function pointerCapture(session) {
     const pointerId = session.pointerId;
@@ -80,30 +80,39 @@ export function createGestureController(root, options = {}) {
   function clearSwipeVisual(record) {
     options.onSwipeVisual?.({ row: record.row, phase: 'end', dx: 0, session: record.session });
   }
+  function scrollContainerIsLive(record) {
+    const scrollContainer = record.scrollContainer;
+    if (!scrollContainer || scrollContainer.isConnected === false) return false;
+    const documentScroller = record.row?.ownerDocument?.scrollingElement ?? documentTarget?.scrollingElement;
+    if (scrollContainer.nodeType === 1 && scrollContainer !== documentScroller && root.contains && !root.contains(scrollContainer)) return false;
+    return typeof scrollContainer.getBoundingClientRect === 'function';
+  }
   function scheduleAutoScroll(record) {
-    if (record.autoScrollFrame || !options.getScrollContainer) return;
+    if (record.autoScrollFrame !== 0 || !record.scrollContainer) return;
     const tick = () => {
       record.autoScrollFrame = 0;
       if (!sessions.has(record.session.pointerId) || record.session.state !== 'dragging') return;
-      const scrollContainer = options.getScrollContainer({ row: record.row, session: record.session });
-      let keepRunning = false;
-      if (scrollContainer) {
-        const rect = scrollContainer.getBoundingClientRect();
-        const speed = autoScrollSpeed(record.session.lastY, rect.top, rect.bottom, config.dragEdgeSize, config.dragMaxSpeed);
-        if (speed !== 0) {
-          const before = scrollContainer.scrollTop;
-          const maximum = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
-          scrollContainer.scrollTop = Math.max(0, Math.min(maximum, scrollContainer.scrollTop + speed));
-          keepRunning = scrollContainer.scrollTop !== before;
-        }
-        refreshDragTarget(record);
+      if (!scrollContainerIsLive(record)) {
+        finish(record, { clientX: record.session.lastX, clientY: record.session.lastY }, true);
+        return;
       }
+      const scrollContainer = record.scrollContainer;
+      let keepRunning = false;
+      const rect = scrollContainer.getBoundingClientRect();
+      const speed = autoScrollSpeed(record.session.lastY, rect.top, rect.bottom, config.dragEdgeSize, config.dragMaxSpeed);
+      if (speed !== 0) {
+        const before = scrollContainer.scrollTop;
+        const maximum = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
+        scrollContainer.scrollTop = Math.max(0, Math.min(maximum, scrollContainer.scrollTop + speed));
+        keepRunning = scrollContainer.scrollTop !== before;
+      }
+      refreshDragTarget(record);
       if (keepRunning) record.autoScrollFrame = requestAnimationFrame(tick);
     };
     record.autoScrollFrame = requestAnimationFrame(tick);
   }
   function stopAutoScroll(record) {
-    if (!record.autoScrollFrame) return;
+    if (record.autoScrollFrame === 0) return;
     cancelAnimationFrame(record.autoScrollFrame);
     record.autoScrollFrame = 0;
   }
@@ -164,6 +173,14 @@ export function createGestureController(root, options = {}) {
         options.onCancel?.({ row: record.row, session: record.session });
         return false;
       }
+      if (options.getScrollContainer) {
+        record.scrollContainer = options.getScrollContainer({ row: record.row, session: record.session });
+        if (!record.scrollContainer) {
+          record.session = { ...record.session, state: 'cancelled', winner: null };
+          options.onCancel?.({ row: record.row, session: record.session });
+          return false;
+        }
+      }
       scheduleAutoScroll(record);
       return true;
     }
@@ -193,7 +210,7 @@ export function createGestureController(root, options = {}) {
     return true;
   }
   function process(record, transition, event) {
-    const result = stepGestureSession(record.session, transition);
+    const result = stepGestureSession(record.session, transition, config);
     record.session = result.session;
     for (const effect of result.effects) {
       if (!callEffect(record, effect, event)) break;
@@ -209,7 +226,10 @@ export function createGestureController(root, options = {}) {
       record.session = result.session;
     }
     if (record.session.winner === 'swipe' || record.session.winner === 'rename') clearSwipeVisual(record);
+    record.row.classList.remove('drag-target', 'category-drag-target', 'dragging', 'category-dragging', 'long-pressed', 'is-swiping', 'swipe-left', 'swipe-right');
+    record.row.style?.removeProperty?.('--swipe-x');
     clearDragClasses();
+    record.scrollContainer = null;
     sessions.delete(record.session.pointerId);
     if (activePointerId === record.session.pointerId) activePointerId = null;
   }
@@ -231,7 +251,7 @@ export function createGestureController(root, options = {}) {
       policy,
       edgeGuarded: isEdgeGuarded(event, policy),
     });
-    const record = { row, session, timer: null, target: null, autoScrollFrame: 0 };
+    const record = { row, session, timer: null, target: null, autoScrollFrame: 0, scrollContainer: null };
     sessions.set(session.pointerId, record);
     activePointerId = session.pointerId;
     if (session.longPressPending) {

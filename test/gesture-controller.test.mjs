@@ -15,6 +15,7 @@ class FakeElement {
   constructor({ className = '', tagName = 'DIV', dataset = {} } = {}) {
     this.classList = new FakeClassList(className);
     this.tagName = tagName;
+    this.nodeType = 1;
     this.dataset = { ...dataset };
     this.children = [];
     this.parentNode = null;
@@ -149,6 +150,59 @@ test('delegated title swipe follows raw dx and commits once', () => {
   controller.dispose();
 });
 
+test('controller uses gesture duration for swipe velocity and commits only deliberate gestures', () => {
+  const previousWindow = globalThis.window;
+  globalThis.window = { innerWidth: 400 };
+  try {
+    const { root, childBody } = makeRows();
+    let clock = 0;
+    const swipes = [];
+    const controller = createGestureController(root, { now: () => clock, onSwipe: ({ direction }) => swipes.push(direction) });
+    const run = (pointerId, startX, startY, moveX, moveY, startTime, moveTime, endTime) => {
+      clock = startTime;
+      pointer(root, 'pointerdown', childBody, startX, startY, { pointerId });
+      clock = moveTime;
+      pointer(root, 'pointermove', childBody, moveX, moveY, { pointerId });
+      clock = endTime;
+      pointer(root, 'pointerup', childBody, moveX, moveY, { pointerId });
+      pointer(root, 'click', childBody, moveX, moveY, { pointerId });
+    };
+    run(11, 200, 200, 128, 200, 0, 75, 150); // 72px / 150ms
+    run(12, 200, 200, 128, 200, 1000, 1500, 3000); // 72px / 2000ms
+    run(13, 200, 200, 70, 200, 4000, 5000, 6000); // 130px / 2000ms
+    run(14, 200, 200, 70, 305, 7000, 7500, 9000); // invalid angle
+    run(15, 200, 200, 150, 200, 10000, 10001, 10001); // fast but too short
+    run(16, 28, 200, -52, 200, 11000, 11010, 11020); // exact edge guard
+    assert.deepEqual(swipes, ['left', 'left']);
+    controller.dispose();
+  } finally {
+    if (previousWindow) globalThis.window = previousWindow; else delete globalThis.window;
+  }
+});
+
+test('active, completed, and right swipes each invoke one mutation callback', () => {
+  const { root, child, childBody } = makeRows();
+  let clock = 0;
+  const mutations = [];
+  const controller = createGestureController(root, { now: () => clock, onSwipe: ({ row, direction }) => mutations.push(`${row.dataset.itemId}:${row.dataset.status ?? 'active'}:${direction}`) });
+  const run = (pointerId, status, endX) => {
+    child.dataset.status = status;
+    clock += 1;
+    pointer(root, 'pointerdown', childBody, 200, 200, { pointerId });
+    clock += 50;
+    pointer(root, 'pointermove', childBody, endX, 200, { pointerId });
+    clock += 50;
+    pointer(root, 'pointerup', childBody, endX, 200, { pointerId });
+    pointer(root, 'click', childBody, endX, 200, { pointerId });
+  };
+  run(21, 'active', 120);
+  run(22, 'completed', 120);
+  run(23, 'active', 280);
+  assert.deepEqual(mutations, ['child:active:left', 'child:completed:left', 'child:active:right']);
+  assert.equal(controller.getSessionCount(), 0);
+  controller.dispose();
+});
+
 test('handle drag remains delegated after source row is detached and commits once', async () => {
   const { root, parent, child, handle } = makeRows();
   let starts = 0;
@@ -195,6 +249,101 @@ test('virtual-list style drag auto-scroll continues while the pointer is station
     await wait(15);
     assert.ok(scrollContainer.scrollTop > 0);
     pointer(root, 'pointerup', handle, 100, 495, { pointerId: 6 });
+    controller.dispose();
+  } finally {
+    if (previousFrame) globalThis.requestAnimationFrame = previousFrame; else delete globalThis.requestAnimationFrame;
+    if (previousCancel) globalThis.cancelAnimationFrame = previousCancel; else delete globalThis.cancelAnimationFrame;
+  }
+});
+
+test('virtual-list drag keeps the original viewport after the source row unmounts', async () => {
+  const previousFrame = globalThis.requestAnimationFrame;
+  const previousCancel = globalThis.cancelAnimationFrame;
+  globalThis.requestAnimationFrame = (callback) => setTimeout(callback, 0);
+  globalThis.cancelAnimationFrame = (frame) => clearTimeout(frame);
+  try {
+    const root = new FakeElement({ className: 'app-root' });
+    const viewport = new FakeElement({ className: 'virtual-viewport' });
+    viewport.scrollTop = 0;
+    viewport.scrollHeight = 20000;
+    viewport.clientHeight = 200;
+    viewport.getBoundingClientRect = () => ({ top: 100, bottom: 500 });
+    const pageScroll = { scrollTop: 0, scrollHeight: 20000, clientHeight: 800, getBoundingClientRect: () => ({ top: 0, bottom: 800 }) };
+    const source = new FakeElement({ className: 'item-row', dataset: { itemId: 'source', gestureContext: 'tree', hasChildren: 'false' } });
+    const handle = new FakeElement({ tagName: 'BUTTON', dataset: { gestureZone: GESTURE_ZONES.handle } });
+    source.append(handle);
+    const targetRow = new FakeElement({ className: 'item-row', dataset: { itemId: 'target', gestureContext: 'tree', hasChildren: 'false' } });
+    viewport.append(source, targetRow);
+    root.append(viewport);
+    let containerLookups = 0;
+    let endCount = 0;
+    let endTarget = null;
+    const controller = createGestureController(root, {
+      longPressDuration: 8,
+      onDragStart: () => true,
+      getScrollContainer: ({ row }) => {
+        containerLookups += 1;
+        return row.parentNode ? viewport : pageScroll;
+      },
+      resolveDragTarget: () => ({ id: 'target', allowed: true, row: targetRow }),
+      onDragEnd: ({ target }) => { endCount += 1; endTarget = target?.id ?? null; },
+    });
+    pointer(root, 'pointerdown', handle, 100, 100, { pointerId: 30 });
+    await wait(15);
+    pointer(root, 'pointermove', handle, 100, 495, { pointerId: 30 });
+    viewport.removeChild(source);
+    await wait(35);
+    assert.equal(source.parentNode, null);
+    assert.equal(containerLookups, 1);
+    assert.ok(viewport.scrollTop > 0);
+    assert.equal(pageScroll.scrollTop, 0);
+    pointer(root, 'pointerup', targetRow, 100, 495, { pointerId: 30 });
+    assert.equal(endCount, 1);
+    assert.equal(endTarget, 'target');
+    assert.equal(controller.getSessionCount(), 0);
+    const settled = viewport.scrollTop;
+    await wait(15);
+    assert.equal(viewport.scrollTop, settled);
+    controller.dispose();
+  } finally {
+    if (previousFrame) globalThis.requestAnimationFrame = previousFrame; else delete globalThis.requestAnimationFrame;
+    if (previousCancel) globalThis.cancelAnimationFrame = previousCancel; else delete globalThis.cancelAnimationFrame;
+  }
+});
+
+test('destroyed drag viewport cancels instead of falling back to page scrolling', async () => {
+  const previousFrame = globalThis.requestAnimationFrame;
+  const previousCancel = globalThis.cancelAnimationFrame;
+  globalThis.requestAnimationFrame = (callback) => setTimeout(callback, 0);
+  globalThis.cancelAnimationFrame = (frame) => clearTimeout(frame);
+  try {
+    const root = new FakeElement({ className: 'app-root' });
+    const viewport = new FakeElement({ className: 'virtual-viewport' });
+    viewport.scrollTop = 0;
+    viewport.scrollHeight = 20000;
+    viewport.clientHeight = 200;
+    viewport.getBoundingClientRect = () => ({ top: 100, bottom: 500 });
+    const source = new FakeElement({ className: 'item-row', dataset: { itemId: 'source', gestureContext: 'tree', hasChildren: 'false' } });
+    const handle = new FakeElement({ tagName: 'BUTTON', dataset: { gestureZone: GESTURE_ZONES.handle } });
+    source.append(handle); viewport.append(source); root.append(viewport);
+    let cancelled = 0;
+    let ended = 0;
+    const controller = createGestureController(root, {
+      longPressDuration: 8,
+      onDragStart: () => true,
+      getScrollContainer: () => viewport,
+      onCancel: () => { cancelled += 1; },
+      onDragEnd: () => { ended += 1; },
+    });
+    pointer(root, 'pointerdown', handle, 100, 100, { pointerId: 31 });
+    await wait(15);
+    pointer(root, 'pointermove', handle, 100, 495, { pointerId: 31 });
+    root.removeChild(viewport);
+    await wait(15);
+    assert.equal(cancelled, 1);
+    assert.equal(ended, 0);
+    assert.equal(controller.getSessionCount(), 0);
+    pointer(root, 'pointerup', root, 100, 495, { pointerId: 31 });
     controller.dispose();
   } finally {
     if (previousFrame) globalThis.requestAnimationFrame = previousFrame; else delete globalThis.requestAnimationFrame;

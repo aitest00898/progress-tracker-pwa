@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  GESTURE_CONFIG,
   GESTURE_STATES,
   GESTURE_ZONES,
   autoScrollSpeed,
@@ -89,6 +90,12 @@ test('handle touch waits for long press, mouse starts drag at a small movement',
   mouse = step(mouse, 'move', 5, 0, 10).session;
   assert.equal(mouse.state, GESTURE_STATES.dragging);
   assert.equal(step(mouse, 'up', 5, 0, 20).effects[0].type, 'dragEnd');
+
+  let pen = createGestureSession({ pointerId: 61, pointerType: 'pen', zone: GESTURE_ZONES.handle });
+  pen = step(pen, 'move', 4, 0, 10).session;
+  assert.equal(pen.state, GESTURE_STATES.possible);
+  pen = step(pen, 'longpress', 4, 0, 650).session;
+  assert.equal(pen.state, GESTURE_STATES.dragging);
 });
 
 test('edge guard preserves horizontal list gestures for system navigation', () => {
@@ -104,6 +111,25 @@ test('live swipe motion is linear and velocity is measurable without changing it
   assert.equal(swipeVelocity(-80, 200), 0.4);
   assert.equal(gestureAxis(-30, 8), 'horizontal');
   assert.equal(shouldCommitSwipe(-72, 0, 200), true);
+});
+
+test('swipe commit uses full gesture duration with velocity or deliberate long pull', () => {
+  assert.equal(GESTURE_CONFIG.actionDistance, 72);
+  assert.equal(GESTURE_CONFIG.minSwipeVelocity, 0.25);
+  assert.equal(GESTURE_CONFIG.deliberateSwipeDistance, 120);
+  assert.equal(shouldCommitSwipe(72, 0, 150), true, 'fast normal swipe commits');
+  assert.equal(shouldCommitSwipe(72, 0, 2000), false, 'slow short swipe does not commit');
+  assert.equal(shouldCommitSwipe(130, 0, 2000), true, 'slow deliberate long pull commits');
+  assert.equal(shouldCommitSwipe(130, 105, 20), false, 'invalid vertical angle does not commit');
+  assert.equal(shouldCommitSwipe(50, 0, 1), false, 'fast swipe below action distance does not commit');
+});
+
+test('ambiguous diagonal movement never falls back to a tap', () => {
+  let session = createGestureSession({ pointerId: 81, pointerType: 'touch', zone: GESTURE_ZONES.body });
+  session = step(session, 'move', -130, 105, 40).session;
+  assert.equal(session.state, GESTURE_STATES.possible);
+  assert.equal(session.moved, true);
+  assert.deepEqual(step(session, 'up', -130, 105, 2000).effects, []);
 });
 
 test('cancel and repeated pointerup cannot produce a second mutation effect', () => {

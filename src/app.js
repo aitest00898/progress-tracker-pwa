@@ -95,6 +95,7 @@ function iconButton(glyph, label, onClick, options = {}) {
 }
 function heading(text, level = 2, className = '') { return node(`h${level}`, { class: className }, text); }
 function stop(event) { event.preventDefault(); event.stopPropagation(); }
+function isKeyboardActivation(event) { return event?.detail === 0; }
 
 function scheduleRender() {
   if (renderScheduled) return;
@@ -198,20 +199,24 @@ function rowPolicy(row, zone, event) {
 function rowItem(row) { return row?.dataset.itemId ? getItem(currentState(), row.dataset.itemId, renderIndex(currentState())) : null; }
 function rowCategory(row) { return row?.dataset.categoryId ? getCategory(currentState(), row.dataset.categoryId, renderIndex(currentState())) : null; }
 
-function handleGestureTap({ row, zone }) {
+function executeItemTapAction(item, action) {
+  if (action === 'focusOriginal') { focusItem(item); return; }
+  if (action === 'toggleExpanded') { toggleExpanded(item); return; }
+  if (action === 'quickActions') toggleQuickActions(item.id);
+}
+
+function executeRowTapPolicy(row, zone) {
   const category = rowCategory(row);
   if (category) { setPage('categories', category.id); return; }
   const item = rowItem(row);
   if (!item) return;
-  const context = row.dataset.gestureContext ?? 'tree';
-  if (context === 'search' && zone !== GESTURE_ZONES.control) { focusItem(item); return; }
-  if (zone === GESTURE_ZONES.title && ['smart', 'today'].includes(context)) { focusItem(item); return; }
-  if (zone === GESTURE_ZONES.title && itemHasChildren(currentState(), item.id)) { toggleExpanded(item); return; }
-  if (zone === GESTURE_ZONES.body && ['tree', 'detail'].includes(context) && itemHasChildren(currentState(), item.id)) { toggleExpanded(item); return; }
-  toggleQuickActions(item.id);
+  const policy = rowPolicy(row, zone, null);
+  executeItemTapAction(item, zone === GESTURE_ZONES.title ? policy.titleTap : policy.bodyTap);
 }
 
-function itemHasChildren(state, itemId) { return childrenOf(state, itemId, renderIndex(state)).length > 0; }
+function handleGestureTap({ row, zone }) {
+  executeRowTapPolicy(row, zone);
+}
 
 function handleGestureRename({ row }) {
   const category = rowCategory(row);
@@ -473,7 +478,7 @@ function renderCategoryNav(state, category) {
   const itemCount = index.itemsByCategory.get(category.id)?.length ?? 0;
   const row = node('div', { class: `category-nav-row ${active ? 'active' : ''}`, dataset: { categoryId: category.id, gestureRow: 'category', gestureContext: 'category' } });
   const handle = node('button', { class: 'category-drag-handle', type: 'button', ariaLabel: tr('categoryDrag'), title: tr('categoryDrag'), 'data-gesture-zone': GESTURE_ZONES.handle }, '⠿');
-  const title = node('button', { class: 'category-nav-title', type: 'button', 'data-gesture-zone': GESTURE_ZONES.title, onClick: () => setPage('categories', category.id) }, node('span', { class: 'category-dot' }, '•'), node('span', {}, category.title), node('small', {}, String(itemCount)));
+  const title = node('button', { class: 'category-nav-title', type: 'button', 'data-gesture-zone': GESTURE_ZONES.title, onClick: (event) => { if (isKeyboardActivation(event)) setPage('categories', category.id); } }, node('span', { class: 'category-dot' }, '•'), node('span', {}, category.title), node('small', {}, String(itemCount)));
   const more = iconButton('⋮', tr('more'), (event) => { stop(event); openCategoryMenu(category); }, { className: 'category-more' });
   more.dataset.gestureZone = GESTURE_ZONES.control;
   row.append(handle, title, more);
@@ -683,7 +688,8 @@ function renderItemRow(state, item, { depth = 0, sourceDepth = depth, maxDepth =
   const statusButton = button(item.status === 'completed' ? '✓' : item.status === 'skipped' ? '–' : '○', () => conflict ? blockConflictedEdit() : performStatus(item, nextStatus), { className: `status-button ${item.status}`, ariaLabel: item.status === 'completed' ? tr('reopen') : item.status === 'skipped' ? tr('unskip') : tr('complete'), title: item.status === 'completed' ? tr('reopen') : item.status === 'skipped' ? tr('unskip') : tr('complete') });
   statusButton.dataset.gestureZone = GESTURE_ZONES.control;
   const ring = node('span', { class: 'progress-ring', style: { '--progress': `${progress.numeric}%` }, ariaLabel: tr('progressPercent', { value: progress.numeric }) }, node('span', {}, progress.label));
-  const title = node('button', { type: 'button', class: 'item-title', 'data-gesture-zone': GESTURE_ZONES.title, onClick: () => { if (pathContext) focusItem(item); else if (isParent) toggleExpanded(item); else toggleQuickActions(item.id); } }, item.title);
+  const titlePolicy = resolveInteractionPolicy({ rowType: 'item', surface: interactionContext, isParent: semantics.isParent, pathContext });
+  const title = node('button', { type: 'button', class: 'item-title', 'data-gesture-zone': GESTURE_ZONES.title, onClick: (event) => { if (isKeyboardActivation(event)) executeItemTapAction(item, titlePolicy.titleTap); } }, item.title);
   const titleLine = node('div', { class: 'item-title-line' }, title, item.importance ? node('span', { class: 'importance-stars', title: tr('importance') }, '★'.repeat(item.importance)) : null, reminders.length ? node('span', { class: 'reminder-symbol', title: tr('reminder'), ariaLabel: tr('reminder') }, '⌁') : null, conflict ? node('span', { class: 'conflict-indicator', title: tr('syncConflict'), ariaLabel: tr('syncConflict') }, '⚠') : null);
   const path = pathContext ? node('span', { class: 'item-path-context' }, pathString(state, item.id, index)) : null;
   const meta = node('div', { class: `item-meta ${pathContext ? 'with-path' : ''}` }, node('span', { class: `due-text ${overdue ? 'overdue' : isToday ? 'today' : ''}`, title: due.source === 'inherited' ? tr('inherited') : due.source === 'explicit' ? tr('explicit') : tr('noDeadline') }, dueText), item.tags.length ? node('span', { class: 'tag-count' }, `#${item.tags.length}`) : null, path);

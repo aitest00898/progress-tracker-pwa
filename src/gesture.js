@@ -21,6 +21,8 @@ export const GESTURE_CONFIG = Object.freeze({
   axisLockDistance: 10,
   axisRatio: 1.3,
   actionDistance: 72,
+  minSwipeVelocity: 0.25,
+  deliberateSwipeDistance: 120,
   mouseDragDistance: 4,
   longPressDuration: 650,
   longPressMoveTolerance: 10,
@@ -40,7 +42,7 @@ function clamp(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, value));
 }
 
-/** @param {number} dx @param {number} dy */
+/** @param {number} dx @param {number} dy @param {Record<string, number>} [config] */
 export function gestureAxis(dx, dy, config = GESTURE_CONFIG) {
   const horizontal = Math.abs(dx);
   const vertical = Math.abs(dy);
@@ -56,16 +58,14 @@ export function swipeVelocity(dx, elapsedMs) {
   return Math.abs(dx) / duration;
 }
 
-/** @param {number} dx @param {number} dy @param {number} [elapsedMs] */
+/** @param {number} dx @param {number} dy @param {number} [elapsedMs] @param {Record<string, number>} [config] */
 export function shouldCommitSwipe(dx, dy, elapsedMs = 0, config = GESTURE_CONFIG) {
   const horizontal = Math.abs(dx);
   const vertical = Math.abs(dy);
   if (horizontal < config.actionDistance || horizontal <= vertical * config.axisRatio) return false;
   if (gestureAxis(dx, dy, config) !== 'horizontal') return false;
-  // Velocity is tracked for diagnostics and future threshold tuning, but the
-  // first version intentionally commits from distance plus angle only.
-  swipeVelocity(dx, elapsedMs);
-  return true;
+  const velocity = swipeVelocity(dx, elapsedMs);
+  return velocity >= config.minSwipeVelocity || horizontal >= config.deliberateSwipeDistance;
 }
 
 /** @param {number} dx */
@@ -155,9 +155,10 @@ function moveEffect(session, event, dx, dy) {
 /**
  * @param {Record<string, any>} session
  * @param {{type: 'move'|'longpress'|'up'|'cancel', x?: number, y?: number, time?: number}} event
+ * @param {Record<string, number>} [config]
  * @returns {{session: Record<string, any>, effects: Array<Record<string, any>>}}
  */
-export function stepGestureSession(session, event) {
+export function stepGestureSession(session, event, config = GESTURE_CONFIG) {
   const next = { ...session };
   const effects = [];
   const x = Number.isFinite(event.x) ? event.x : next.lastX;
@@ -204,18 +205,18 @@ export function stepGestureSession(session, event) {
 
     const distance = Math.max(Math.abs(dx), Math.abs(dy));
     if (distance === 0) return { session: next, effects };
-    if (next.longPressPending && distance > GESTURE_CONFIG.longPressMoveTolerance) {
+    if (next.longPressPending && distance > config.longPressMoveTolerance) {
       next.longPressPending = false;
       effects.push({ type: 'cancelLongPress' });
     }
     if (next.zone === GESTURE_ZONES.handle) {
-      if (next.pointerType === 'mouse' && distance >= GESTURE_CONFIG.mouseDragDistance && next.policy.allowDrag) {
+      if (next.pointerType === 'mouse' && distance >= config.mouseDragDistance && next.policy.allowDrag) {
         next.state = GESTURE_STATES.dragging;
         next.winner = 'drag';
         next.moved = true;
         next.suppressClick = true;
         effects.push({ type: 'dragStart' }, { type: 'dragMove', x, y });
-      } else if (distance > GESTURE_CONFIG.longPressMoveTolerance) {
+      } else if (distance > config.longPressMoveTolerance) {
         next.moved = true;
         next.state = GESTURE_STATES.cancelled;
         next.suppressClick = true;
@@ -224,10 +225,10 @@ export function stepGestureSession(session, event) {
       return { session: next, effects };
     }
     if (!next.policy.allowSwipe || next.edgeGuarded || (next.zone !== GESTURE_ZONES.title && next.zone !== GESTURE_ZONES.body)) {
-      if (distance > GESTURE_CONFIG.axisLockDistance) next.moved = true;
+      if (distance > config.axisLockDistance) next.moved = true;
       return { session: next, effects };
     }
-    const axis = gestureAxis(dx, dy);
+    const axis = gestureAxis(dx, dy, config);
     next.axis = axis;
     if (axis === 'vertical') {
       next.state = GESTURE_STATES.cancelled;
@@ -242,6 +243,9 @@ export function stepGestureSession(session, event) {
       next.longPressPending = false;
       next.suppressClick = true;
       effects.push({ type: 'swipeStart', direction: swipeDirection(dx) }, { type: 'swipeMove', dx, dy, x, y });
+    } else if (distance > config.axisLockDistance) {
+      next.moved = true;
+      next.longPressPending = false;
     }
     return { session: next, effects };
   }
@@ -260,7 +264,10 @@ export function stepGestureSession(session, event) {
       next.state = GESTURE_STATES.ended;
       next.longPressPending = false;
       next.suppressClick = true;
-      effects.push(shouldCommitSwipe(dx, dy, time - next.startTime) ? { type: 'swipeCommit', direction: swipeDirection(dx), dx, dy } : { type: 'swipeCancel', dx, dy });
+      const elapsedMs = Math.max(0, time - next.startTime);
+      effects.push(shouldCommitSwipe(dx, dy, elapsedMs, config)
+        ? { type: 'swipeCommit', direction: swipeDirection(dx), dx, dy, elapsedMs, velocity: swipeVelocity(dx, elapsedMs) }
+        : { type: 'swipeCancel', dx, dy, elapsedMs });
       return { session: next, effects };
     }
     if (next.state === GESTURE_STATES.dragging) {
