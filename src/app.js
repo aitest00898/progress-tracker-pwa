@@ -31,6 +31,7 @@ let repository;
 let renderScheduled = false;
 let renderFallbackTimer = null;
 let activeVirtualList = null;
+let activeVirtualViewKey = null;
 let retainedVirtualScroll = null;
 let gestureController = null;
 let renderEngineIndex = null;
@@ -122,7 +123,7 @@ function virtualViewKey(state = currentState()) {
 
 function retainVirtualScroll(state) {
   const viewport = activeVirtualList?.viewport;
-  const key = virtualViewKey(state);
+  const key = activeVirtualViewKey;
   if (!viewport || !key) { retainedVirtualScroll = null; return; }
   retainedVirtualScroll = {
     key,
@@ -438,6 +439,7 @@ function render() {
   const appleTitle = /** @type {HTMLMetaElement|null} */ (document.querySelector('meta[name="apple-mobile-web-app-title"]')); if (appleTitle) appleTitle.content = shell.title;
   activeVirtualList?.destroy();
   activeVirtualList = null;
+  activeVirtualViewKey = null;
   root.replaceChildren(renderShell(state));
   restoreVirtualScroll(state);
 }
@@ -665,6 +667,7 @@ function renderTreeList(state, category) {
       }),
     empty: () => renderEmptyState('noItems', 'addItem', () => (/** @type {HTMLInputElement|null} */ (document.querySelector('.quick-create-input')))?.focus()),
   });
+  activeVirtualViewKey = virtualViewKey(state);
   activeVirtualList.setItems(rows);
   return holder;
 }
@@ -678,6 +681,7 @@ function renderSearchResults(state) {
   const holder = node('div', { class: 'search-list-holder' });
   activeVirtualList?.destroy();
   activeVirtualList = new VirtualList(holder, { rowHeight: 116, overscan: 10, renderRow: (item) => renderItemRow(state, item, { depth: 0, tree: false, pathContext: true, interactionContext: 'search' }), empty: () => renderEmptyState('noResults') });
+  activeVirtualViewKey = virtualViewKey(state);
   activeVirtualList.setItems(results);
   section.append(holder); return section;
 }
@@ -902,6 +906,7 @@ function renderSmartPage(state) {
   if (!items.length) { page.append(renderEmptyState('smartEmpty')); return page; }
   const holder = node('div', { class: 'smart-list-holder' });
   activeVirtualList?.destroy(); activeVirtualList = new VirtualList(holder, { rowHeight: 116, overscan: 10, renderRow: (entry) => entry.kind === 'section' ? node('div', { class: 'list-section-heading' }, node('span', {}, entry.label), node('small', {}, String(entry.count))) : renderSmartRow(state, entry, ui.smartView), empty: () => renderEmptyState('smartEmpty') });
+  activeVirtualViewKey = virtualViewKey(state);
   activeVirtualList.setItems(smartRows);
   page.append(holder);
   return page;
