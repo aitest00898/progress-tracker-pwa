@@ -207,7 +207,7 @@ function handleGestureTap({ row, zone }) {
   if (context === 'search' && zone !== GESTURE_ZONES.control) { focusItem(item); return; }
   if (zone === GESTURE_ZONES.title && ['smart', 'today'].includes(context)) { focusItem(item); return; }
   if (zone === GESTURE_ZONES.title && itemHasChildren(currentState(), item.id)) { toggleExpanded(item); return; }
-  if (zone === GESTURE_ZONES.body && context === 'tree' && itemHasChildren(currentState(), item.id)) { toggleExpanded(item); return; }
+  if (zone === GESTURE_ZONES.body && ['tree', 'detail'].includes(context) && itemHasChildren(currentState(), item.id)) { toggleExpanded(item); return; }
   toggleQuickActions(item.id);
 }
 
