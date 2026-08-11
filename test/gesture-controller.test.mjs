@@ -229,6 +229,33 @@ test('handle drag remains delegated after source row is detached and commits onc
   controller.dispose();
 });
 
+test('touch handle drag captures the original handle even at the system edge', async () => {
+  const previousWindow = globalThis.window;
+  globalThis.window = { innerWidth: 390 };
+  try {
+    const { root, child, handle } = makeRows();
+    let starts = 0;
+    let ends = 0;
+    const controller = createGestureController(root, {
+      longPressDuration: 8,
+      onDragStart: () => { starts += 1; return true; },
+      resolveDragTarget: () => ({ id: 'child', allowed: true, row: child }),
+      onDragEnd: () => { ends += 1; },
+    });
+    pointer(root, 'pointerdown', handle, 12, 100, { pointerId: 40, pointerType: 'touch' });
+    await wait(15);
+    assert.equal(handle.capture.has(40), true);
+    pointer(root, 'pointermove', handle, 60, 180, { pointerId: 40, pointerType: 'touch' });
+    pointer(root, 'pointerup', child, 60, 180, { pointerId: 40, pointerType: 'touch' });
+    assert.equal(starts, 1);
+    assert.equal(ends, 1);
+    assert.equal(controller.getSessionCount(), 0);
+    controller.dispose();
+  } finally {
+    if (previousWindow) globalThis.window = previousWindow; else delete globalThis.window;
+  }
+});
+
 test('virtual-list style drag auto-scroll continues while the pointer is stationary near an edge', async () => {
   const previousFrame = globalThis.requestAnimationFrame;
   const previousCancel = globalThis.cancelAnimationFrame;

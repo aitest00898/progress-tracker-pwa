@@ -217,9 +217,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .swipe-action-background { position: absolute; inset: 0; z-index: 0; display: flex; align-items: center; justify-content: space-between; padding: 0 var(--space-5); color: var(--text-muted); font-size: 12px; font-weight: 760; opacity: 0; pointer-events: none; }
 .swipe-action-left, .swipe-action-right { opacity: .82; }
 .item-row.swipe-left.is-swiping .swipe-action-left, .item-row.swipe-right.is-swiping .swipe-action-right { opacity: 1; }
-.item-row-main { display: grid; grid-template-columns: 24px 32px 44px minmax(0, 1fr) 28px; align-items: center; gap: var(--space-2); min-width: 0; max-width: 100%; min-height: 78px; padding: 10px var(--space-3); padding-left: calc(var(--space-3) + var(--depth) * var(--space-5)); }
-.item-row-main.leaf { grid-template-columns: 24px 32px minmax(0, 1fr) 28px; }
-.drag-handle { width: 24px; border: 0; padding: 0; color: var(--text-faint); background: transparent; font-size: 20px; cursor: grab; touch-action: none; }
+.item-row-main { display: grid; grid-template-columns: var(--touch-target) 32px 44px minmax(0, 1fr) 28px; align-items: center; gap: var(--space-2); min-width: 0; max-width: 100%; min-height: 78px; padding: 10px var(--space-3); padding-left: calc(var(--space-3) + var(--depth) * var(--space-5)); }
+.item-row-main.leaf { grid-template-columns: var(--touch-target) 32px minmax(0, 1fr) 28px; }
+.drag-handle { width: var(--touch-target); min-width: var(--touch-target); min-height: var(--touch-target); border: 0; padding: 0; color: var(--text-faint); background: transparent; cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 .drag-handle:active { cursor: grabbing; }
 .status-button { width: 30px; height: 30px; border: 1px solid var(--border); border-radius: 50%; padding: 0; color: var(--text-muted); background: var(--surface); font-size: 15px; }
 .status-button.active:hover { color: var(--success); border-color: var(--success); background: var(--success-soft); }
@@ -745,10 +745,10 @@ body::before {
 .status-button { min-width: 30px; }
 
 /* Tree hierarchy: full-weight roots, compact descendants, and neutral connectors. */
-.item-row-main.parent { grid-template-columns: 24px 44px minmax(0, 1fr) var(--row-parent-end-width); }
-.item-row-main.leaf { grid-template-columns: 24px 32px minmax(0, 1fr) var(--touch-target); }
-.item-row-main.has-bulk-checkbox.parent { grid-template-columns: 16px 24px 44px minmax(0, 1fr) var(--row-parent-end-width); }
-.item-row-main.has-bulk-checkbox.leaf { grid-template-columns: 16px 24px 32px minmax(0, 1fr) var(--touch-target); }
+.item-row-main.parent { grid-template-columns: var(--touch-target) 44px minmax(0, 1fr) var(--row-parent-end-width); }
+.item-row-main.leaf { grid-template-columns: var(--touch-target) 32px minmax(0, 1fr) var(--touch-target); }
+.item-row-main.has-bulk-checkbox.parent { grid-template-columns: 16px var(--touch-target) 44px minmax(0, 1fr) var(--row-parent-end-width); }
+.item-row-main.has-bulk-checkbox.leaf { grid-template-columns: 16px var(--touch-target) 32px minmax(0, 1fr) var(--touch-target); }
 .quick-actions-trigger, .row-end-controls .detail-chevron { min-height: var(--touch-target); }
 .tree-row {
   --tree-indent: min(var(--tree-max-indent), calc(var(--depth) * var(--tree-indent-step)));

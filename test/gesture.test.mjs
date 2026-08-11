@@ -98,6 +98,16 @@ test('handle touch waits for long press, mouse starts drag at a small movement',
   assert.equal(pen.state, GESTURE_STATES.dragging);
 });
 
+test('reorder handle remains long-press eligible at the system edge', () => {
+  let handle = createGestureSession({ pointerId: 62, pointerType: 'touch', zone: GESTURE_ZONES.handle, edgeGuarded: true });
+  handle = step(handle, 'longpress', 0, 0, 650).session;
+  assert.equal(handle.state, GESTURE_STATES.dragging);
+
+  let title = createGestureSession({ pointerId: 63, pointerType: 'touch', zone: GESTURE_ZONES.title, edgeGuarded: true });
+  title = step(title, 'longpress', 0, 0, 650).session;
+  assert.equal(title.state, GESTURE_STATES.possible);
+});
+
 test('edge guard preserves horizontal list gestures for system navigation', () => {
   let session = createGestureSession({ pointerId: 7, pointerType: 'touch', zone: GESTURE_ZONES.body, edgeGuarded: true });
   session = step(session, 'move', -100, 0, 50).session;

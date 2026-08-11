@@ -56,16 +56,20 @@ export function createGestureController(root, options = {}) {
     if (!policy.allowSwipe || typeof window === 'undefined') return false;
     return event.clientX <= config.edgeGuard || event.clientX >= window.innerWidth - config.edgeGuard;
   }
-  function pointerCapture(session) {
+  function pointerCapture(session, preferredTarget = null) {
     const pointerId = session.pointerId;
-    if (root.setPointerCapture && pointerId !== undefined && pointerId !== null) {
-      try { root.setPointerCapture(pointerId); } catch { /* pointer may have ended before capture */ }
+    if (pointerId === undefined || pointerId === null) return;
+    for (const target of [preferredTarget, root]) {
+      if (!target?.setPointerCapture) continue;
+      try { target.setPointerCapture(pointerId); } catch { /* pointer may have ended before capture */ }
     }
   }
-  function releasePointer(session) {
+  function releasePointer(session, preferredTarget = null) {
     const pointerId = session.pointerId;
-    if (root.releasePointerCapture && pointerId !== undefined && pointerId !== null) {
-      try { root.releasePointerCapture(pointerId); } catch { /* capture is best effort */ }
+    if (pointerId === undefined || pointerId === null) return;
+    for (const target of [preferredTarget, root]) {
+      if (!target?.releasePointerCapture) continue;
+      try { target.releasePointerCapture(pointerId); } catch { /* capture is best effort */ }
     }
   }
   function markSuppressed(row) {
@@ -133,7 +137,7 @@ export function createGestureController(root, options = {}) {
     if (effect.type === 'cancelLongPress') { clearTimer(record); return true; }
     if (effect.type === 'swipeStart') {
       clearTimer(record);
-      pointerCapture(record.session);
+      pointerCapture(record.session, record.pointerTarget);
       event?.preventDefault?.();
       options.onSwipeVisual?.({ row: record.row, phase: 'start', direction: effect.direction, dx: 0, session: record.session });
       return true;
@@ -164,7 +168,7 @@ export function createGestureController(root, options = {}) {
     }
     if (effect.type === 'dragStart') {
       clearTimer(record);
-      pointerCapture(record.session);
+      pointerCapture(record.session, record.pointerTarget);
       event?.preventDefault?.();
       if (canUseHaptic()) globalThis.navigator.vibrate(8);
       const accepted = options.onDragStart?.({ row: record.row, session: record.session, event }) !== false;
@@ -220,7 +224,7 @@ export function createGestureController(root, options = {}) {
   function finish(record, event, cancelled = false) {
     clearTimer(record);
     stopAutoScroll(record);
-    releasePointer(record.session);
+    releasePointer(record.session, record.pointerTarget);
     if (cancelled) {
       const result = process(record, { type: 'cancel', x: event?.clientX, y: event?.clientY, time: now() }, event);
       record.session = result.session;
@@ -251,7 +255,7 @@ export function createGestureController(root, options = {}) {
       policy,
       edgeGuarded: isEdgeGuarded(event, policy),
     });
-    const record = { row, session, timer: null, target: null, autoScrollFrame: 0, scrollContainer: null };
+    const record = { row, pointerTarget: event.target, session, timer: null, target: null, autoScrollFrame: 0, scrollContainer: null };
     sessions.set(session.pointerId, record);
     activePointerId = session.pointerId;
     if (session.longPressPending) {

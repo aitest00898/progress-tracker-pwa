@@ -122,8 +122,13 @@ export function createGestureSession({
   policy = resolveInteractionPolicy(),
   edgeGuarded = false,
 } = {}) {
-  const longPressEligible = (pointerType !== 'mouse' && (zone === GESTURE_ZONES.title || zone === GESTURE_ZONES.handle))
-    && !edgeGuarded;
+  // The system edge gesture owns horizontal movement from the edge, but a
+  // dedicated reorder handle is still a valid long-press target there. The
+  // handle itself never claims horizontal swipe movement, so allowing the
+  // long press does not steal the system back gesture.
+  const longPressEligible = pointerType !== 'mouse'
+    && (zone === GESTURE_ZONES.title || zone === GESTURE_ZONES.handle)
+    && (zone === GESTURE_ZONES.handle || !edgeGuarded);
   return {
     state: GESTURE_STATES.possible,
     pointerId,
