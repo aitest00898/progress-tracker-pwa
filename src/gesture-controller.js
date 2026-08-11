@@ -15,7 +15,7 @@ const DEFAULT_ROW_SELECTOR = '.item-row, .category-nav-row';
  * replacing gesture listeners or the active drag session.
  *
  * @param {HTMLElement} root
- * @param {{rowSelector?: string, getPolicy?: (context: {row: HTMLElement, zone: string, event: PointerEvent}) => Record<string, any>, getRowKey?: (row: HTMLElement) => string|null, onOutsidePointerDown?: (context: {event: PointerEvent, row: HTMLElement|null}) => void, onTap?: (context: {row: HTMLElement, zone: string, session: Record<string, any>, event: PointerEvent}) => void, onRename?: (context: {row: HTMLElement, zone: string, session: Record<string, any>, event: PointerEvent}) => void, onSwipeVisual?: (context: {row: HTMLElement, phase: string, dx?: number, direction?: string, session: Record<string, any>}) => void, onSwipe?: (context: {row: HTMLElement, direction: string, session: Record<string, any>, event: PointerEvent}) => void, onDragStart?: (context: {row: HTMLElement, session: Record<string, any>, event: PointerEvent|null}) => boolean|void, resolveDragTarget?: (context: {row: HTMLElement, session: Record<string, any>, x: number, y: number}) => {id?: string|null, beforeId?: string|null, noOp?: boolean, position?: string, allowed?: boolean, row?: HTMLElement|null}|null, onDragTarget?: (context: {row: HTMLElement, session: Record<string, any>, target: {id?: string|null, beforeId?: string|null, noOp?: boolean, position?: string, allowed?: boolean, row?: HTMLElement|null}|null}) => void, onDragMove?: (context: {row: HTMLElement, session: Record<string, any>, x: number, y: number, scrollTop?: number, scrollLeft?: number, dragStartScrollTop?: number, dragStartScrollLeft?: number}) => void, onDragEnd?: (context: {row: HTMLElement, session: Record<string, any>, target: {id?: string|null, beforeId?: string|null, noOp?: boolean, position?: string, allowed?: boolean, row?: HTMLElement|null}|null, event: PointerEvent}) => void, onCancel?: (context: {row: HTMLElement, session: Record<string, any>}) => void, getScrollContainer?: (context: {row: HTMLElement, session: Record<string, any>}) => HTMLElement|null, now?: () => number, longPressDuration?: number}} [options]
+ * @param {{rowSelector?: string, getPolicy?: (context: {row: HTMLElement, zone: string, event: PointerEvent}) => Record<string, any>, getRowKey?: (row: HTMLElement) => string|null, onOutsidePointerDown?: (context: {event: PointerEvent, row: HTMLElement|null}) => void, onPressVisual?: (context: {row: HTMLElement, phase: string, zone?: string, session: Record<string, any>}) => void, onTap?: (context: {row: HTMLElement, zone: string, session: Record<string, any>, event: PointerEvent}) => void, onRename?: (context: {row: HTMLElement, zone: string, session: Record<string, any>, event: PointerEvent}) => void, onSwipeVisual?: (context: {row: HTMLElement, phase: string, dx?: number, direction?: string, session: Record<string, any>}) => void, onSwipe?: (context: {row: HTMLElement, direction: string, session: Record<string, any>, event: PointerEvent}) => void, onDragStart?: (context: {row: HTMLElement, session: Record<string, any>, event: PointerEvent|null}) => boolean|void, resolveDragTarget?: (context: {row: HTMLElement, session: Record<string, any>, x: number, y: number}) => {id?: string|null, beforeId?: string|null, noOp?: boolean, position?: string, allowed?: boolean, row?: HTMLElement|null}|null, onDragTarget?: (context: {row: HTMLElement, session: Record<string, any>, target: {id?: string|null, beforeId?: string|null, noOp?: boolean, position?: string, allowed?: boolean, row?: HTMLElement|null}|null}) => void, onDragMove?: (context: {row: HTMLElement, session: Record<string, any>, x: number, y: number, scrollTop?: number, scrollLeft?: number, dragStartScrollTop?: number, dragStartScrollLeft?: number}) => void, onDragEnd?: (context: {row: HTMLElement, session: Record<string, any>, target: {id?: string|null, beforeId?: string|null, noOp?: boolean, position?: string, allowed?: boolean, row?: HTMLElement|null}|null, event: PointerEvent}) => void, onCancel?: (context: {row: HTMLElement, session: Record<string, any>}) => void, getScrollContainer?: (context: {row: HTMLElement, session: Record<string, any>}) => HTMLElement|null, now?: () => number, longPressDuration?: number}} [options]
  */
 export function createGestureController(root, options = {}) {
   const config = { ...GESTURE_CONFIG, longPressDuration: options.longPressDuration ?? GESTURE_CONFIG.longPressDuration };
@@ -85,7 +85,14 @@ export function createGestureController(root, options = {}) {
     });
   }
   function clearSwipeVisual(record) {
+    if (record.swipeVisualCleared) return;
+    record.swipeVisualCleared = true;
     options.onSwipeVisual?.({ row: record.row, phase: 'end', dx: 0, session: record.session });
+  }
+  function clearPressVisual(record, phase = 'end') {
+    if (!record.pressActive) return;
+    record.pressActive = false;
+    options.onPressVisual?.({ row: record.row, phase, zone: record.session.zone, session: record.session });
   }
   function scrollContainerIsLive(record) {
     const scrollContainer = record.scrollContainer;
@@ -156,6 +163,7 @@ export function createGestureController(root, options = {}) {
     if (effect.type === 'cancelLongPress') { clearTimer(record); return true; }
     if (effect.type === 'swipeStart') {
       clearTimer(record);
+      clearPressVisual(record, 'swipe');
       pointerCapture(record.session, record.pointerTarget);
       event?.preventDefault?.();
       options.onSwipeVisual?.({ row: record.row, phase: 'start', direction: effect.direction, dx: 0, session: record.session });
@@ -179,6 +187,7 @@ export function createGestureController(root, options = {}) {
     }
     if (effect.type === 'rename') {
       clearTimer(record);
+      clearPressVisual(record, 'rename');
       markSuppressed(record.row);
       record.row.classList.add('long-pressed');
       if (canUseHaptic()) globalThis.navigator.vibrate(8);
@@ -187,6 +196,7 @@ export function createGestureController(root, options = {}) {
     }
     if (effect.type === 'dragStart') {
       clearTimer(record);
+      clearPressVisual(record, 'drag');
       pointerCapture(record.session, record.pointerTarget);
       event?.preventDefault?.();
       if (canUseHaptic()) globalThis.navigator.vibrate(8);
@@ -235,9 +245,10 @@ export function createGestureController(root, options = {}) {
       options.onTap?.({ row: record.row, zone: record.session.zone, session: record.session, event });
       return true;
     }
-    if (effect.type === 'verticalScroll') return true;
+    if (effect.type === 'verticalScroll') { clearPressVisual(record, 'vertical'); return true; }
     if (effect.type === 'cancel') {
       clearTimer(record);
+      clearPressVisual(record, 'cancel');
       options.onCancel?.({ row: record.row, session: record.session });
       return true;
     }
@@ -260,8 +271,10 @@ export function createGestureController(root, options = {}) {
       record.session = result.session;
     }
     if (record.session.winner === 'swipe' || record.session.winner === 'rename') clearSwipeVisual(record);
+    clearPressVisual(record, cancelled ? 'cancel' : 'end');
+    const swipeReleaseOwnsOffset = record.row.classList.contains('swipe-releasing');
     record.row.classList.remove('drag-target', 'drag-target-before', 'drag-target-after', 'category-drag-target', 'dragging', 'category-dragging', 'long-pressed', 'is-swiping', 'swipe-left', 'swipe-right');
-    record.row.style?.removeProperty?.('--swipe-x');
+    if (!swipeReleaseOwnsOffset) record.row.style?.removeProperty?.('--swipe-x');
     record.row.style?.removeProperty?.('--drag-x');
     record.row.style?.removeProperty?.('--drag-y');
     clearDragClasses();
@@ -287,9 +300,10 @@ export function createGestureController(root, options = {}) {
       policy,
       edgeGuarded: isEdgeGuarded(event, policy),
     });
-    const record = { row, pointerTarget: event.target, session, timer: null, target: null, autoScrollFrame: 0, scrollContainer: null };
+    const record = { row, pointerTarget: event.target, session, timer: null, target: null, autoScrollFrame: 0, scrollContainer: null, pressActive: true, swipeVisualCleared: false };
     sessions.set(session.pointerId, record);
     activePointerId = session.pointerId;
+    options.onPressVisual?.({ row, phase: 'start', zone, session });
     if (session.longPressPending) {
       record.timer = setTimeout(() => {
         if (!sessions.has(session.pointerId)) return;
@@ -313,6 +327,16 @@ export function createGestureController(root, options = {}) {
     const record = sessions.get(event.pointerId);
     if (!record) return;
     finish(record, event, true);
+  }
+  function onDocumentPointerMove(event) {
+    if (root.contains?.(event.target)) return;
+    onPointerMove(event);
+  }
+  function onDocumentPointerUp(event) {
+    onPointerUp(event);
+  }
+  function onDocumentPointerCancel(event) {
+    onPointerCancel(event);
   }
   function onClick(event) {
     const row = rowForTarget(event.target);
@@ -344,6 +368,9 @@ export function createGestureController(root, options = {}) {
   root.addEventListener('click', onClick, true);
   root.addEventListener('keydown', onKeydown, true);
   documentTarget?.addEventListener('pointerdown', onDocumentPointerDown, true);
+  documentTarget?.addEventListener('pointermove', onDocumentPointerMove, true);
+  documentTarget?.addEventListener('pointerup', onDocumentPointerUp, true);
+  documentTarget?.addEventListener('pointercancel', onDocumentPointerCancel, true);
 
   return {
     cancelAll,
@@ -356,6 +383,9 @@ export function createGestureController(root, options = {}) {
       root.removeEventListener('click', onClick, true);
       root.removeEventListener('keydown', onKeydown, true);
       documentTarget?.removeEventListener('pointerdown', onDocumentPointerDown, true);
+      documentTarget?.removeEventListener('pointermove', onDocumentPointerMove, true);
+      documentTarget?.removeEventListener('pointerup', onDocumentPointerUp, true);
+      documentTarget?.removeEventListener('pointercancel', onDocumentPointerCancel, true);
     },
     getActiveSession() { return activePointerId === null ? null : sessions.get(activePointerId)?.session ?? null; },
     getSessionCount() { return sessions.size; },

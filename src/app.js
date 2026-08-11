@@ -25,6 +25,10 @@ import {
   restoreConflictArchive,
 } from './sync.js';
 import { restoreMigrationSnapshot } from './migration.js';
+import {
+  INTERACTION_CLASSES, INTERACTION_CONFIG, closestPressableControl,
+  focusableSelector, isRowPressCancellation,
+} from './interaction.js';
 
 const root = /** @type {HTMLElement} */ (document.querySelector('#app'));
 let repository;
@@ -40,6 +44,11 @@ let initialised = false;
 const driveSync = new GoogleDriveSync();
 let syncTimer = null;
 let syncInFlight = false;
+let interactionCleanup = null;
+let modalFocusOwner = null;
+let modalReturnFocus = null;
+let modalFocusPending = false;
+let modalFocusTimer = null;
 const ui = {
   page: 'categories', categoryId: null, smartView: 'today', settingsPage: 'general', detailId: null,
   search: '', tag: '', quickActionId: null, addChildFor: null, expanded: new Set(), focusRoot: null, notesTab: 'edit',
@@ -89,7 +98,15 @@ function node(tag, attributes = {}, ...children) {
 
 function icon(glyph, label) { return node('span', { class: 'icon', ariaLabel: label, title: label, role: 'img' }, glyph); }
 function button(label, onClick, options = {}) {
-  return node('button', { type: 'button', class: options.className ?? 'button', ariaLabel: options.ariaLabel ?? label, title: options.title, disabled: options.disabled, onClick }, options.icon ? icon(options.icon, options.ariaLabel ?? label) : null, options.text === false ? null : label);
+  return node('button', {
+    type: 'button',
+    class: options.className ?? 'button',
+    ariaLabel: options.ariaLabel ?? label,
+    title: options.title,
+    disabled: options.disabled,
+    dataset: { interactionControl: 'true' },
+    onClick,
+  }, options.icon ? icon(options.icon, options.ariaLabel ?? label) : null, options.text === false ? null : label);
 }
 function iconButton(glyph, label, onClick, options = {}) {
   const className = ['icon-button', options.className].filter(Boolean).join(' ');
@@ -98,6 +115,109 @@ function iconButton(glyph, label, onClick, options = {}) {
 function heading(text, level = 2, className = '') { return node(`h${level}`, { class: className }, text); }
 function stop(event) { event.preventDefault(); event.stopPropagation(); }
 function isKeyboardActivation(event) { return event?.detail === 0; }
+
+function installInteractionFeedback() {
+  const pressedControls = new Map();
+  const pointerKey = (event) => event?.pointerId ?? 'pointer';
+  const clearControl = (key) => {
+    const control = pressedControls.get(key);
+    if (!control) return;
+    control.classList.remove(INTERACTION_CLASSES.controlPressed);
+    pressedControls.delete(key);
+  };
+  const clearAll = () => { for (const key of [...pressedControls.keys()]) clearControl(key); };
+  const onPointerDown = (event) => {
+    if (event.button !== undefined && event.button !== 0) return;
+    const control = closestPressableControl(event.target, root);
+    if (!control) return;
+    const key = pointerKey(event);
+    clearControl(key);
+    pressedControls.set(key, control);
+    control.classList.add(INTERACTION_CLASSES.controlPressed);
+  };
+  const onPointerMove = (event) => {
+    const key = pointerKey(event);
+    const control = pressedControls.get(key);
+    if (!control) return;
+    if (event.buttons === 0 || !control.contains(event.target)) clearControl(key);
+  };
+  const onPointerOut = (event) => {
+    const key = pointerKey(event);
+    const control = pressedControls.get(key);
+    if (control && event.relatedTarget && !control.contains(event.relatedTarget)) clearControl(key);
+  };
+  const onPointerEnd = (event) => clearControl(pointerKey(event));
+  const onKeyDown = (event) => {
+    if (!['Enter', ' '].includes(event.key)) return;
+    const control = closestPressableControl(event.target, root);
+    if (!control) return;
+    control.classList.add(INTERACTION_CLASSES.controlPressed);
+  };
+  const onKeyUp = (event) => {
+    const control = closestPressableControl(event.target, root);
+    control?.classList.remove(INTERACTION_CLASSES.controlPressed);
+  };
+
+  root.addEventListener('pointerdown', onPointerDown, true);
+  root.addEventListener('pointermove', onPointerMove, true);
+  root.addEventListener('pointerout', onPointerOut, true);
+  root.addEventListener('pointerup', onPointerEnd, true);
+  root.addEventListener('pointercancel', onPointerEnd, true);
+  root.addEventListener('keydown', onKeyDown, true);
+  root.addEventListener('keyup', onKeyUp, true);
+  globalThis.addEventListener('blur', clearAll);
+  return () => {
+    clearAll();
+    root.removeEventListener('pointerdown', onPointerDown, true);
+    root.removeEventListener('pointermove', onPointerMove, true);
+    root.removeEventListener('pointerout', onPointerOut, true);
+    root.removeEventListener('pointerup', onPointerEnd, true);
+    root.removeEventListener('pointercancel', onPointerEnd, true);
+    root.removeEventListener('keydown', onKeyDown, true);
+    root.removeEventListener('keyup', onKeyUp, true);
+    globalThis.removeEventListener('blur', clearAll);
+  };
+}
+
+function prepareModalFocus() {
+  if (ui.modal && modalFocusOwner !== ui.modal) {
+    if (!modalFocusOwner) modalReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    modalFocusOwner = ui.modal;
+    modalFocusPending = true;
+  }
+  if (!ui.modal && modalFocusOwner) {
+    const returnFocus = modalReturnFocus;
+    modalFocusOwner = null;
+    modalReturnFocus = null;
+    modalFocusPending = false;
+    if (modalFocusTimer !== null) { clearTimeout(modalFocusTimer); modalFocusTimer = null; }
+    if (returnFocus?.isConnected && typeof returnFocus.focus === 'function') {
+      setTimeout(() => returnFocus.focus({ preventScroll: true }), 0);
+    }
+  }
+}
+
+function focusModalInitialControl() {
+  if (!ui.modal) return;
+  const box = /** @type {HTMLElement|null} */ (root.querySelector('.modal-box'));
+  if (!box) return;
+  const first = /** @type {HTMLElement|null} */ (box.querySelector('input:not([type="hidden"]), textarea, select') ?? box.querySelector(focusableSelector()));
+  (first ?? box).focus?.({ preventScroll: true });
+}
+
+function trapModalFocus(event) {
+  if (!ui.modal || event.key !== 'Tab') return false;
+  const box = /** @type {HTMLElement|null} */ (root.querySelector('.modal-box'));
+  if (!box) return false;
+  const focusable = Array.from(box.querySelectorAll(focusableSelector())).filter((element) => !element.hasAttribute('disabled'));
+  if (!focusable.length) { event.preventDefault(); box.focus?.(); return true; }
+  const first = /** @type {HTMLElement} */ (focusable[0]);
+  const last = /** @type {HTMLElement} */ (focusable.at(-1));
+  const active = document.activeElement;
+  if (event.shiftKey && active === first) { event.preventDefault(); last.focus(); return true; }
+  if (!event.shiftKey && active === last) { event.preventDefault(); first.focus(); return true; }
+  return false;
+}
 
 function scheduleRender() {
   if (renderScheduled) return;
@@ -204,8 +324,9 @@ function clearFocus(categoryId) {
 }
 
 function clearGestureClasses() {
-  root?.querySelectorAll?.('.drag-target, .drag-target-before, .drag-target-after, .category-drag-target, .dragging, .category-dragging, .long-pressed, .is-swiping, .swipe-left, .swipe-right')?.forEach((element) => {
-    element.classList.remove('drag-target', 'drag-target-before', 'drag-target-after', 'category-drag-target', 'dragging', 'category-dragging', 'long-pressed', 'is-swiping', 'swipe-left', 'swipe-right');
+  root?.querySelectorAll?.(`.${INTERACTION_CLASSES.controlPressed}`)?.forEach((element) => element.classList.remove(INTERACTION_CLASSES.controlPressed));
+  root?.querySelectorAll?.('.drag-target, .drag-target-before, .drag-target-after, .category-drag-target, .dragging, .category-dragging, .long-pressed, .is-swiping, .swipe-left, .swipe-right, .row-pressed, .swipe-releasing')?.forEach((element) => {
+    element.classList.remove('drag-target', 'drag-target-before', 'drag-target-after', 'category-drag-target', 'dragging', 'category-dragging', 'long-pressed', 'is-swiping', 'swipe-left', 'swipe-right', 'row-pressed', 'swipe-releasing');
     (/** @type {HTMLElement} */ (element)).style.removeProperty('--swipe-x');
     (/** @type {HTMLElement} */ (element)).style.removeProperty('--drag-x');
     (/** @type {HTMLElement} */ (element)).style.removeProperty('--drag-y');
@@ -423,14 +544,26 @@ function installGestureController() {
       const insideQuick = (/** @type {Element|null} */ (event.target))?.closest?.('.quick-action-row, .quick-actions-trigger');
       if (!insideQuick) { ui.quickActionId = null; ui.addChildFor = null; scheduleRender(); }
     },
+    onPressVisual: ({ row, phase }) => {
+      if (phase === 'start') row.classList.add(INTERACTION_CLASSES.rowPressed);
+      else if (isRowPressCancellation(phase) || phase === 'end') row.classList.remove(INTERACTION_CLASSES.rowPressed);
+    },
     onTap: handleGestureTap,
     onRename: handleGestureRename,
     onSwipeVisual: ({ row, phase, dx, direction }) => {
       if (phase === 'end') {
-        row.classList.remove('is-swiping', 'swipe-left', 'swipe-right');
-        row.style.removeProperty('--swipe-x');
-        row.classList.add('swipe-reset');
-        requestAnimationFrame(() => row.classList.remove('swipe-reset'));
+        if (!row.classList.contains('is-swiping') && !row.style.getPropertyValue('--swipe-x')) return;
+        const currentOffset = row.style.getPropertyValue('--swipe-x') || '0px';
+        row.classList.remove('is-swiping', 'swipe-left', 'swipe-right', 'row-pressed');
+        row.classList.add(INTERACTION_CLASSES.swipeReleasing);
+        row.style.setProperty('--swipe-x', currentOffset);
+        requestAnimationFrame(() => {
+          row.style.setProperty('--swipe-x', '0px');
+          setTimeout(() => {
+            row.classList.remove(INTERACTION_CLASSES.swipeReleasing);
+            row.style.removeProperty('--swipe-x');
+          }, INTERACTION_CONFIG.releaseDurationMs);
+        });
         return;
       }
       row.classList.add('is-swiping');
@@ -451,10 +584,13 @@ function installGestureController() {
 
 function handleKeyboardShortcuts(event) {
   if (event.key === 'Escape') {
+    if (ui.modal) { closeModal(); return; }
     if (ui.quickActionId || ui.addChildFor) { clearTransientInteractionState({ preserveSelection: true }); scheduleRender(); return; }
-    if (ui.modal || ui.detailId) { ui.modal = null; ui.detailId = null; scheduleRender(); }
+    if (ui.detailId) { ui.detailId = null; scheduleRender(); }
     return;
   }
+  if (ui.modal && trapModalFocus(event)) return;
+  if (ui.modal) return;
   if (event.metaKey || event.ctrlKey || event.altKey) return;
   const target = event.target;
   const editing = target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName);
@@ -500,6 +636,7 @@ function focusItem(item) {
 function render() {
   if (!initialised || !repository?.getState()) return;
   const state = currentState();
+  prepareModalFocus();
   retainVirtualScroll(state);
   renderNow = new Date();
   renderEngineIndex = createEngineIndex(state);
@@ -519,6 +656,11 @@ function render() {
   activeVirtualViewKey = null;
   root.replaceChildren(renderShell(state));
   restoreVirtualScroll(state);
+  if (modalFocusPending) {
+    modalFocusPending = false;
+    if (modalFocusTimer !== null) clearTimeout(modalFocusTimer);
+    modalFocusTimer = setTimeout(() => { modalFocusTimer = null; focusModalInitialControl(); }, 0);
+  }
 }
 
 function renderShell(state) {
@@ -541,7 +683,12 @@ function renderShell(state) {
   const detailItem = !recoveryMode && ui.detailId ? getItem(state, ui.detailId, index) : null;
   if (detailItem) shell.append(renderDetailPanel(state, detailItem));
   if (ui.modal) shell.append(renderModal(state));
-  if (ui.toast) shell.append(node('div', { class: `toast toast-${ui.toast.kind}`, role: 'status' }, node('span', {}, ui.toast.message), ui.toast.undo ? button(tr('undo'), ui.toast.undo, { className: 'toast-undo' }) : null));
+  if (ui.toast) shell.append(node('div', {
+    class: `toast toast-${ui.toast.kind}`,
+    role: ui.toast.kind === 'error' ? 'alert' : 'status',
+    'aria-live': ui.toast.kind === 'error' ? 'assertive' : 'polite',
+    'aria-atomic': 'true',
+  }, node('span', {}, ui.toast.message), ui.toast.undo ? button(tr('undo'), ui.toast.undo, { className: 'toast-undo' }) : null));
   return shell;
 }
 
@@ -814,7 +961,12 @@ function renderItemRow(state, item, { depth = 0, sourceDepth = depth, maxDepth =
   const chevron = iconButton('›', tr('detail'), () => openDetail(item.id), { className: 'detail-chevron' });
   chevron.dataset.gestureZone = GESTURE_ZONES.control;
   const quickTrigger = isParent ? iconButton('⋯', tr('more'), (event) => { stop(event); if (conflict) blockConflictedEdit(); else toggleQuickActions(item.id); }, { className: 'quick-actions-trigger' }) : null;
-  if (quickTrigger) { quickTrigger.dataset.gestureZone = GESTURE_ZONES.control; quickTrigger.dataset.action = 'quick-actions'; }
+  if (quickTrigger) {
+    quickTrigger.dataset.gestureZone = GESTURE_ZONES.control;
+    quickTrigger.dataset.action = 'quick-actions';
+    quickTrigger.setAttribute('aria-expanded', String(ui.quickActionId === item.id));
+    quickTrigger.setAttribute('aria-controls', `quick-actions-${item.id}`);
+  }
   const endControls = node('div', { class: 'row-end-controls', 'data-gesture-zone': GESTURE_ZONES.body }, quickTrigger, chevron);
   const main = node('div', { class: `item-row-main ${showRing ? 'parent' : 'leaf'} ${semantics.isTreeRow ? 'tree-row-main' : ''}`, 'data-gesture-zone': GESTURE_ZONES.body }, handle, showRing ? ring : statusButton, info, endControls);
   const actionRow = node('div', { class: 'item-actions', 'data-gesture-zone': GESTURE_ZONES.control }, button(item.status === 'completed' ? tr('reopen') : item.status === 'skipped' ? tr('unskip') : tr('complete'), () => conflict ? blockConflictedEdit() : performStatus(item, nextStatus), { className: 'row-action', icon: item.status === 'completed' ? '↺' : '✓' }), button(tr('addChild'), () => conflict ? blockConflictedEdit() : (ui.quickActionId = item.id, ui.addChildFor = item.id, scheduleRender()), { className: 'row-action', icon: '+' }), button(state.today.items[item.id] ? tr('removeFromToday') : tr('moveToToday'), () => conflict ? blockConflictedEdit() : toggleToday(item), { className: 'row-action', icon: '◷' }), iconButton('⋯', tr('more'), (event) => { stop(event); if (conflict) blockConflictedEdit(); else openItemMenu(item); }, { className: 'row-action-more' }));
@@ -826,7 +978,7 @@ function renderItemRow(state, item, { depth = 0, sourceDepth = depth, maxDepth =
 }
 
 function renderQuickActionRow(state, item) {
-  const row = node('div', { class: 'quick-action-row', 'data-gesture-zone': GESTURE_ZONES.control }, node('span', { class: 'quick-action-label' }, tr('more')), button(tr('addChild'), () => itemHasConflict(state, item.id) ? blockConflictedEdit() : openChildCreate(item), { className: 'quick-action-button' }), button(state.today.items[item.id] ? tr('removeFromToday') : tr('moveToToday'), () => itemHasConflict(state, item.id) ? blockConflictedEdit() : toggleToday(item), { className: 'quick-action-button' }), node('label', { class: 'quick-priority' }, tr('priority'), node('select', { value: item.priority, ariaLabel: tr('priority'), onChange: (event) => itemHasConflict(currentState(), item.id) ? blockConflictedEdit() : mutate('priority_changed', (draft) => setPriority(draft, item.id, event.target.value) , 'priorityChanged') }, ...['none', 'low', 'medium', 'high'].map((value) => node('option', { value }, priorityLabel(value))))), button(tr('close'), () => { ui.quickActionId = null; ui.addChildFor = null; scheduleRender(); }, { className: 'quick-action-button' }));
+  const row = node('div', { class: 'quick-action-row', id: `quick-actions-${item.id}`, role: 'group', 'aria-label': tr('more'), 'data-gesture-zone': GESTURE_ZONES.control }, node('span', { class: 'quick-action-label' }, tr('more')), button(tr('addChild'), () => itemHasConflict(state, item.id) ? blockConflictedEdit() : openChildCreate(item), { className: 'quick-action-button' }), button(state.today.items[item.id] ? tr('removeFromToday') : tr('moveToToday'), () => itemHasConflict(state, item.id) ? blockConflictedEdit() : toggleToday(item), { className: 'quick-action-button' }), node('label', { class: 'quick-priority' }, tr('priority'), node('select', { value: item.priority, ariaLabel: tr('priority'), onChange: (event) => itemHasConflict(currentState(), item.id) ? blockConflictedEdit() : mutate('priority_changed', (draft) => setPriority(draft, item.id, event.target.value) , 'priorityChanged') }, ...['none', 'low', 'medium', 'high'].map((value) => node('option', { value }, priorityLabel(value))))), button(tr('close'), () => { ui.quickActionId = null; ui.addChildFor = null; scheduleRender(); }, { className: 'quick-action-button' }));
   return row;
 }
 
@@ -1142,6 +1294,8 @@ export async function mountApp(repo) {
   }
   initialised = true;
   installGestureController();
+  interactionCleanup?.();
+  interactionCleanup = installInteractionFeedback();
   render();
   if (!state.meta.recoveryMode && state.settings.cloudSync?.authorized) scheduleCloudSync(250);
   if (!state.meta.recoveryMode && state.settings.developerEnabled) await repository.update('performance_tti', (draft) => { recordPerformance(draft, 'time_to_interactive', performance.now() - startupStartedAt, { itemCount: draft.items.length }); return { ok: true }; }, null, { queue: false });
@@ -1974,6 +2128,12 @@ function renderRecoveryCard(state) {
   return settingCard(tr('recoveryData'), node('p', { class: 'field-hint' }, snapshots.length ? `${snapshots.length}` : tr('noBackup')), snapshots.map((snapshot) => node('div', { class: 'recovery-row' }, node('span', {}, `${snapshot.fromVersion} → ${snapshot.toVersion} · ${formatDateTime(language(), snapshot.createdAt)}`), button(tr('restore'), () => restoreSnapshotFlow(snapshot), { className: 'text-button' }))));
 }
 
+function closeModal() {
+  if (!ui.modal) return;
+  ui.modal = null;
+  scheduleRender();
+}
+
 function restoreSnapshotFlow(snapshot) {
   try {
     const restored = restoreMigrationSnapshot(currentState(), snapshot);
@@ -2127,8 +2287,22 @@ function renderRecoveryMode(state) {
 
 function renderModal(state) {
   const modal = ui.modal;
-  const backdrop = node('div', { class: 'modal-backdrop', onClick: (event) => { if (event.target === event.currentTarget) { ui.modal = null; scheduleRender(); } } });
-  const box = node('section', { class: `modal-box ${modal.danger ? 'danger-modal' : ''}`, role: 'alertdialog', 'aria-modal': 'true' }, node('div', { class: 'modal-header' }, heading(modal.title ?? tr('more'), 2), iconButton('×', tr('close'), () => { ui.modal = null; scheduleRender(); })), node('div', { class: 'modal-content' }));
+  const title = heading(modal.title ?? tr('more'), 2);
+  title.id = 'active-modal-title';
+  const backdrop = node('div', {
+    class: 'modal-backdrop',
+    'data-modal-backdrop': 'true',
+    onClick: (event) => {
+      if (event.target === event.currentTarget && !modal.danger) closeModal();
+    },
+  });
+  const box = node('section', {
+    class: `modal-box ${modal.danger ? 'danger-modal' : ''}`,
+    role: modal.danger ? 'alertdialog' : 'dialog',
+    'aria-modal': 'true',
+    'aria-labelledby': title.id,
+    tabindex: '-1',
+  }, node('div', { class: 'modal-header' }, title, iconButton('×', tr('close'), closeModal)), node('div', { class: 'modal-content' }));
   const content = box.querySelector('.modal-content');
   if (modal.kind === 'prompt') renderPromptModal(content, modal);
   else if (modal.kind === 'confirm') renderConfirmModal(content, modal);
@@ -2151,9 +2325,9 @@ function renderSimpleModal(content, modal) { if (modal.message) content.append(n
 
 function renderPromptModal(content, modal) {
   const form = node('form', { class: 'modal-form', onSubmit: (event) => { stop(event); const value = form.querySelector('input')?.value ?? ''; if (!value.trim()) return; ui.modal = null; modal.onSubmit(value); } });
-  const input = node('input', { type: 'text', value: modal.value ?? '', ariaLabel: modal.label, autocomplete: 'off' });
+  const input = node('input', { type: 'text', value: modal.value ?? '', ariaLabel: modal.label, autocomplete: 'off', onKeydown: (event) => { if (event.key === 'Enter') { event.preventDefault(); form.requestSubmit(); } } });
   form.append(inputField(modal.label, input), node('div', { class: 'modal-actions' }, button(tr('cancel'), () => { ui.modal = null; scheduleRender(); }, { className: 'text-button' }), button(tr('save'), () => form.requestSubmit(), { className: 'primary-button' })));
-  content.append(form); setTimeout(() => input.focus(), 0);
+  content.append(form);
 }
 
 function renderConfirmModal(content, modal) {

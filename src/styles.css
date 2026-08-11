@@ -1238,3 +1238,151 @@ body::before {
     grid-column: 1;
   }
 }
+
+/* Apple HIG interaction layer: immediate feedback, stable focus, and
+   restrained motion shared by controls, rows, sheets, and gesture surfaces. */
+:root {
+  --duration-press: 90ms;
+  --duration-release: 180ms;
+  --duration-gesture: 160ms;
+  --motion-interaction: cubic-bezier(.2, .7, .2, 1);
+  --motion-spring: cubic-bezier(.2, .8, .25, 1);
+  --press-scale: .98;
+  --row-press-scale: .995;
+  --press-opacity: .78;
+  --focus-ring-width: 3px;
+}
+
+button,
+[role="button"] {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:not(:disabled),
+[role="button"]:not([aria-disabled="true"]) {
+  transition:
+    transform var(--duration-press) var(--motion-interaction),
+    opacity var(--duration-press) var(--motion-interaction),
+    color var(--duration-press) var(--motion-interaction),
+    background var(--duration-press) var(--motion-interaction),
+    border-color var(--duration-press) var(--motion-interaction),
+    box-shadow var(--duration-press) var(--motion-interaction);
+}
+
+button.is-pressed:not(:disabled),
+[role="button"].is-pressed:not([aria-disabled="true"]) {
+  transform: scale(var(--press-scale));
+  opacity: var(--press-opacity);
+}
+
+button:focus-visible,
+[role="button"]:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: none;
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 var(--focus-ring-width) color-mix(in srgb, var(--focus-ring) 28%, transparent);
+}
+
+.button,
+.primary-button,
+.secondary-button,
+.danger-button,
+.text-button {
+  min-height: var(--touch-target);
+}
+
+.icon-button,
+.quick-create-submit,
+.drag-handle,
+.category-drag-handle,
+.status-button {
+  min-width: var(--touch-target);
+  min-height: var(--touch-target);
+}
+
+.icon-button { width: var(--touch-target); }
+.quick-create-submit { width: var(--touch-target); height: var(--touch-target); }
+.status-button { width: var(--touch-target); height: var(--touch-target); }
+.item-row-main.leaf { grid-template-columns: var(--touch-target) var(--touch-target) minmax(0, 1fr) var(--touch-target); }
+.item-row-main.has-bulk-checkbox.leaf { grid-template-columns: 16px var(--touch-target) var(--touch-target) minmax(0, 1fr) var(--touch-target); }
+
+.item-row:focus-within:not(.is-swiping),
+.item-row.row-pressed:not(.is-swiping) {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--focus-ring) 22%, transparent), var(--shadow-1);
+}
+
+.item-row.row-pressed .item-row-main {
+  transform: scale(var(--row-press-scale));
+  transform-origin: center;
+  background: color-mix(in srgb, var(--surface-muted) 36%, var(--surface-solid));
+  transition: transform var(--duration-press) var(--motion-interaction), background var(--duration-press) var(--motion-interaction);
+}
+
+.tree-child.row-pressed .item-row-main {
+  background: color-mix(in srgb, var(--tree-child-surface) 72%, var(--surface-solid));
+}
+
+.item-title.long-pressed { transform: none; text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 3px; }
+
+.item-row.swipe-releasing {
+  transition: transform var(--duration-release) var(--motion-interaction), background var(--duration-release) var(--motion-interaction);
+  will-change: transform;
+}
+
+.item-row:not(.tree-row).swipe-releasing { transform: translate3d(var(--swipe-x), 0, 0); }
+.tree-row.swipe-releasing .item-row-main {
+  transform: translate3d(var(--swipe-x), 0, 0);
+  transition: transform var(--duration-release) var(--motion-interaction), background var(--duration-release) var(--motion-interaction);
+}
+
+.quick-action-row { animation: slide-in var(--duration-release) var(--motion-interaction); }
+.quick-action-button { min-height: 36px; }
+.quick-priority select { min-height: 36px; }
+
+.item-row.dragging,
+.item-row.dragging:hover,
+.item-row.dragging:focus-within {
+  transform: translate3d(var(--drag-x, 0px), var(--drag-y, 0px), 0) scale(1.01);
+  transition: box-shadow var(--duration-gesture) var(--motion-interaction), opacity var(--duration-gesture) var(--motion-interaction) !important;
+}
+
+.category-nav-row.category-dragging,
+.category-nav-row.category-dragging:hover {
+  transform: translate3d(var(--drag-x, 0px), var(--drag-y, 0px), 0) scale(1.01);
+}
+
+.drag-insertion-indicator { transition: opacity var(--duration-gesture) var(--motion-interaction), transform var(--duration-gesture) var(--motion-interaction); }
+.item-row.drag-target-before .drag-insertion-indicator,
+.item-row.drag-target-after .drag-insertion-indicator { animation: drag-insertion-pulse 900ms var(--motion-interaction) infinite alternate; }
+
+.modal-backdrop { animation: fade-in var(--duration-release) var(--motion-interaction); }
+.modal-box { animation: modal-in var(--duration-release) var(--motion-interaction); overscroll-behavior: contain; }
+.modal-box:focus-visible { outline: none; box-shadow: 0 0 0 var(--focus-ring-width) color-mix(in srgb, var(--focus-ring) 28%, transparent), var(--shadow-2); }
+.modal-header .icon-button { flex: 0 0 var(--touch-target); }
+.toast { animation: toast-in var(--duration-release) var(--motion-interaction); }
+.toast-undo { min-height: 36px; padding: 6px 9px; }
+
+@media (max-width: 700px) {
+  .item-row-main.leaf { grid-template-columns: 22px var(--touch-target) minmax(0, 1fr) var(--touch-target); }
+  .item-row-main.has-bulk-checkbox.leaf { grid-template-columns: 16px 22px var(--touch-target) minmax(0, 1fr) var(--touch-target); }
+  .detail-pane { border-radius: 24px 24px 0 0; box-shadow: 0 -18px 52px rgb(0 0 0 / .22); }
+  .detail-header .icon-button { flex: 0 0 var(--touch-target); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-press: 0ms;
+    --duration-release: 0ms;
+    --duration-gesture: 0ms;
+  }
+
+  .item-row.row-pressed .item-row-main,
+  .item-row.swipe-releasing,
+  .tree-row.swipe-releasing .item-row-main,
+  .item-row.dragging,
+  .category-nav-row.category-dragging {
+    transition: none !important;
+  }
+}

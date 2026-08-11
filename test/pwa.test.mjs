@@ -40,7 +40,7 @@ test('supplied artwork powers favicon, PWA, Apple and in-app brand icon surfaces
 
 test('Service Worker caches hashed build assets before atomically replacing the offline document', async () => {
   const source = await readFile('public/sw.js', 'utf8');
-  assert.match(source, /progress-tracker-v19/);
+  assert.match(source, /progress-tracker-v20/);
   assert.match(source, /favicon\.png/);
   assert.match(source, /icon-maskable\.png/);
   assert.match(source, /documentAssets\(html\)/);
@@ -92,4 +92,17 @@ test('item detail is a vertical, viewport-contained surface at mobile widths', a
   assert.match(css, /\.detail-grid \{\s*grid-template-columns: minmax\(0, 1fr\);/);
   assert.match(css, /\.add-reminder-form \{\s*grid-template-columns: minmax\(0, 1fr\);/);
   assert.match(css, /\.markdown-preview pre \{[\s\S]*overflow-x: hidden;/);
+});
+
+test('interaction layer exposes unified press, focus, reduced-motion, and modal contracts', async () => {
+  const css = await readFile('src/styles.css', 'utf8');
+  const app = await readFile('src/app.js', 'utf8');
+  assert.match(css, /--duration-press: 90ms/);
+  assert.match(css, /\.is-pressed:not\(:disabled\)/);
+  assert.match(css, /\.row-pressed \.item-row-main/);
+  assert.match(css, /\.swipe-releasing/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
+  assert.match(app, /installInteractionFeedback\(\)/);
+  assert.match(app, /trapModalFocus\(event\)/);
+  assert.match(app, /role: modal\.danger \? 'alertdialog' : 'dialog'/);
 });

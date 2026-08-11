@@ -121,6 +121,43 @@ test('delegated tap semantics cover parent title/due/blank, leaf body, and contr
   controller.dispose();
 });
 
+test('row press feedback starts on pointerdown and clears on tap, scroll, swipe, drag, and cancel', async () => {
+  const { root, child, childBody, handle } = makeRows();
+  const phases = [];
+  const controller = createGestureController(root, {
+    longPressDuration: 8,
+    onPressVisual: ({ phase }) => phases.push(phase),
+    onDragStart: () => true,
+    resolveDragTarget: () => ({ id: 'child', allowed: true, row: child }),
+  });
+
+  pointer(root, 'pointerdown', childBody, 100, 100, { pointerId: 101 });
+  assert.equal(phases.at(-1), 'start');
+  pointer(root, 'pointerup', childBody, 100, 100, { pointerId: 101 });
+  assert.equal(phases.slice(-2).join(','), 'start,end');
+
+  pointer(root, 'pointerdown', childBody, 100, 120, { pointerId: 102 });
+  pointer(root, 'pointermove', childBody, 103, 150, { pointerId: 102 });
+  assert.equal(phases.at(-1), 'vertical');
+  pointer(root, 'pointerup', childBody, 103, 150, { pointerId: 102 });
+
+  pointer(root, 'pointerdown', childBody, 200, 180, { pointerId: 103 });
+  pointer(root, 'pointermove', childBody, 120, 183, { pointerId: 103 });
+  assert.equal(phases.at(-1), 'swipe');
+  pointer(root, 'pointerup', childBody, 120, 183, { pointerId: 103 });
+
+  pointer(root, 'pointerdown', handle, 100, 220, { pointerId: 104 });
+  await wait(15);
+  assert.equal(phases.at(-1), 'drag');
+  pointer(root, 'pointercancel', handle, 100, 220, { pointerId: 104 });
+  assert.equal(phases.at(-1), 'drag');
+
+  pointer(root, 'pointerdown', childBody, 100, 260, { pointerId: 105 });
+  pointer(root, 'pointercancel', childBody, 100, 260, { pointerId: 105 });
+  assert.equal(phases.at(-1), 'cancel');
+  controller.dispose();
+});
+
 test('delegated title long press renames once and suppresses native click', async () => {
   const { root, parentTitle } = makeRows();
   let renamed = 0;
