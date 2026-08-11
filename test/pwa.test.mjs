@@ -40,7 +40,7 @@ test('supplied artwork powers favicon, PWA, Apple and in-app brand icon surfaces
 
 test('Service Worker caches hashed build assets before atomically replacing the offline document', async () => {
   const source = await readFile('public/sw.js', 'utf8');
-  assert.match(source, /progress-tracker-v18/);
+  assert.match(source, /progress-tracker-v19/);
   assert.match(source, /favicon\.png/);
   assert.match(source, /icon-maskable\.png/);
   assert.match(source, /documentAssets\(html\)/);
@@ -79,4 +79,17 @@ test('document shell and responsive CSS preserve safe areas and reduced motion',
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(css, /animation-duration: \.01ms !important/);
   assert.match(css, /app-body\.recovery-only/);
+});
+
+test('item detail is a vertical, viewport-contained surface at mobile widths', async () => {
+  const css = await readFile('src/styles.css', 'utf8');
+  assert.match(css, /\.detail-pane \{[\s\S]*display: flex;/);
+  assert.match(css, /\.detail-content \{[\s\S]*overflow-x: hidden;/);
+  assert.match(css, /\.detail-content \{[\s\S]*overflow-y: auto;/);
+  assert.match(css, /\.detail-content \{[\s\S]*touch-action: pan-y;/);
+  assert.match(css, /\.detail-content \{[\s\S]*overscroll-behavior-x: none;/);
+  assert.match(css, /\.detail-content \{[\s\S]*min-width: 0;/);
+  assert.match(css, /\.detail-grid \{\s*grid-template-columns: minmax\(0, 1fr\);/);
+  assert.match(css, /\.add-reminder-form \{\s*grid-template-columns: minmax\(0, 1fr\);/);
+  assert.match(css, /\.markdown-preview pre \{[\s\S]*overflow-x: hidden;/);
 });
