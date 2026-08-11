@@ -550,6 +550,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   --tree-child-surface: var(--surface-muted);
   --tree-child-border: rgb(60 60 67 / .13);
   --tree-child-shadow: none;
+  --drag-insertion-color: color-mix(in srgb, var(--primary) 82%, var(--text));
+  --drag-insertion-inset: 12px;
   --touch-target: 44px;
   --row-parent-end-width: 90px;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", "Noto Sans TC", sans-serif;
@@ -587,6 +589,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   --tree-connector: rgb(235 235 245 / .16);
   --tree-child-border: rgb(235 235 245 / .12);
   --tree-child-surface: color-mix(in srgb, var(--surface-solid) 68%, var(--bg));
+  --drag-insertion-color: color-mix(in srgb, var(--primary) 86%, white);
 }
 
 body {
@@ -818,6 +821,72 @@ body::before {
 .tree-row.swipe-right.is-swiping .item-row-main { background: var(--danger-soft); }
 .tree-row.swipe-reset .item-row-main { transition: none !important; }
 .item-row:not(.tree-row).is-swiping .swipe-action-background { opacity: 1; }
+
+/* Drag feedback: the live offset is deliberately linear so the row stays under the pointer.
+   The marker is the animated drop preview; it never changes list layout or priority borders. */
+.item-row.dragging,
+.item-row.dragging:hover,
+.item-row.dragging:focus-within {
+  transform: translate3d(var(--drag-x, 0px), var(--drag-y, 0px), 0) scale(1.018);
+  transition: box-shadow var(--duration-fast) var(--motion-standard), opacity var(--duration-fast) var(--motion-standard) !important;
+  will-change: transform;
+  pointer-events: none;
+  z-index: 8;
+  box-shadow: var(--shadow-2);
+}
+.category-nav-row.category-dragging,
+.category-nav-row.category-dragging:hover {
+  transform: translate3d(var(--drag-x, 0px), var(--drag-y, 0px), 0) scale(1.015);
+  transition: box-shadow var(--duration-fast) var(--motion-standard) !important;
+  will-change: transform;
+  pointer-events: none;
+  z-index: 8;
+  box-shadow: var(--shadow-2);
+}
+.item-row.drag-target {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 48%, transparent), var(--shadow-1);
+}
+.drag-insertion-indicator {
+  position: absolute;
+  z-index: 5;
+  top: 0;
+  right: var(--drag-insertion-inset);
+  left: var(--drag-insertion-inset);
+  height: 3px;
+  border-radius: 999px;
+  background: var(--drag-insertion-color);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--drag-insertion-color) 42%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  transform: scaleX(.72);
+  transform-origin: center;
+  transition: opacity var(--duration-fast) var(--motion-standard), transform var(--duration-fast) var(--motion-spring);
+}
+.drag-insertion-indicator::before {
+  position: absolute;
+  top: 50%;
+  left: -4px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--drag-insertion-color);
+  content: '';
+  transform: translateY(-50%);
+}
+.item-row.drag-target-before .drag-insertion-indicator,
+.item-row.drag-target-after .drag-insertion-indicator {
+  opacity: 1;
+  transform: scaleX(1);
+  animation: drag-insertion-pulse 900ms var(--motion-standard) infinite alternate;
+}
+.item-row.drag-target-after .drag-insertion-indicator { top: auto; bottom: 0; }
+.tree-row.drag-target-before .drag-insertion-indicator { top: -2px; }
+.tree-row.drag-target-after .drag-insertion-indicator { top: auto; bottom: -2px; }
+
+@keyframes drag-insertion-pulse {
+  from { opacity: .72; }
+  to { opacity: 1; }
+}
 
 .setting-card {
   border-color: var(--border-subtle);

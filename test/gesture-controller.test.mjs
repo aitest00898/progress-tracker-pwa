@@ -41,6 +41,7 @@ class FakeElement {
     if (selector === 'textarea') return this.tagName === 'TEXTAREA';
     if (selector === 'a') return this.tagName === 'A';
     if (selector === '[data-gesture-zone]') return Boolean(this.dataset.gestureZone);
+    if (selector.startsWith('.')) return this.classList.contains(selector.slice(1));
     return false;
   }
   closest(selector) {
@@ -200,6 +201,37 @@ test('active, completed, and right swipes each invoke one mutation callback', ()
   run(23, 'active', 280);
   assert.deepEqual(mutations, ['child:active:left', 'child:completed:left', 'child:active:right']);
   assert.equal(controller.getSessionCount(), 0);
+  controller.dispose();
+});
+
+test('drag follows raw pointer coordinates and marks the after insertion edge', async () => {
+  const { root, parent, child, handle } = makeRows();
+  const moves = [];
+  const controller = createGestureController(root, {
+    longPressDuration: 8,
+    onDragStart: ({ row }) => { row.classList.add('dragging'); return true; },
+    resolveDragTarget: () => ({ id: 'child', beforeId: null, position: 'after', allowed: true, row: child }),
+    onDragMove: ({ row, x, y }) => {
+      moves.push({ x, y });
+      row.style.setProperty('--drag-x', `${x - 100}px`);
+      row.style.setProperty('--drag-y', `${y - 100}px`);
+    },
+  });
+  pointer(root, 'pointerdown', handle, 100, 100, { pointerId: 70 });
+  await wait(15);
+  pointer(root, 'pointermove', handle, 137, 224, { pointerId: 70 });
+  assert.deepEqual(moves, [{ x: 137, y: 224 }]);
+  assert.equal(parent.classList.contains('dragging'), true);
+  assert.equal(parent.style['--drag-x'], '37px');
+  assert.equal(parent.style['--drag-y'], '124px');
+  assert.equal(child.classList.contains('drag-target'), true);
+  assert.equal(child.classList.contains('drag-target-after'), true);
+  assert.equal(child.classList.contains('drag-target-before'), false);
+  pointer(root, 'pointerup', child, 137, 224, { pointerId: 70 });
+  assert.equal(parent.classList.contains('dragging'), false);
+  assert.equal(child.classList.contains('drag-target-after'), false);
+  assert.equal(parent.style['--drag-x'], undefined);
+  assert.equal(parent.style['--drag-y'], undefined);
   controller.dispose();
 });
 

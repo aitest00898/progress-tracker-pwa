@@ -15,7 +15,7 @@ const DEFAULT_ROW_SELECTOR = '.item-row, .category-nav-row';
  * replacing gesture listeners or the active drag session.
  *
  * @param {HTMLElement} root
- * @param {{rowSelector?: string, getPolicy?: (context: {row: HTMLElement, zone: string, event: PointerEvent}) => Record<string, any>, getRowKey?: (row: HTMLElement) => string|null, onOutsidePointerDown?: (context: {event: PointerEvent, row: HTMLElement|null}) => void, onTap?: (context: {row: HTMLElement, zone: string, session: Record<string, any>, event: PointerEvent}) => void, onRename?: (context: {row: HTMLElement, zone: string, session: Record<string, any>, event: PointerEvent}) => void, onSwipeVisual?: (context: {row: HTMLElement, phase: string, dx?: number, direction?: string, session: Record<string, any>}) => void, onSwipe?: (context: {row: HTMLElement, direction: string, session: Record<string, any>, event: PointerEvent}) => void, onDragStart?: (context: {row: HTMLElement, session: Record<string, any>, event: PointerEvent|null}) => boolean|void, resolveDragTarget?: (context: {row: HTMLElement, session: Record<string, any>, x: number, y: number}) => {id?: string|null, allowed?: boolean, row?: HTMLElement|null}|null, onDragTarget?: (context: {row: HTMLElement, session: Record<string, any>, target: {id?: string|null, allowed?: boolean, row?: HTMLElement|null}|null}) => void, onDragMove?: (context: {row: HTMLElement, session: Record<string, any>, x: number, y: number}) => void, onDragEnd?: (context: {row: HTMLElement, session: Record<string, any>, target: {id?: string|null, allowed?: boolean, row?: HTMLElement|null}|null, event: PointerEvent}) => void, onCancel?: (context: {row: HTMLElement, session: Record<string, any>}) => void, getScrollContainer?: (context: {row: HTMLElement, session: Record<string, any>}) => HTMLElement|null, now?: () => number, longPressDuration?: number}} [options]
+ * @param {{rowSelector?: string, getPolicy?: (context: {row: HTMLElement, zone: string, event: PointerEvent}) => Record<string, any>, getRowKey?: (row: HTMLElement) => string|null, onOutsidePointerDown?: (context: {event: PointerEvent, row: HTMLElement|null}) => void, onTap?: (context: {row: HTMLElement, zone: string, session: Record<string, any>, event: PointerEvent}) => void, onRename?: (context: {row: HTMLElement, zone: string, session: Record<string, any>, event: PointerEvent}) => void, onSwipeVisual?: (context: {row: HTMLElement, phase: string, dx?: number, direction?: string, session: Record<string, any>}) => void, onSwipe?: (context: {row: HTMLElement, direction: string, session: Record<string, any>, event: PointerEvent}) => void, onDragStart?: (context: {row: HTMLElement, session: Record<string, any>, event: PointerEvent|null}) => boolean|void, resolveDragTarget?: (context: {row: HTMLElement, session: Record<string, any>, x: number, y: number}) => {id?: string|null, beforeId?: string|null, noOp?: boolean, position?: string, allowed?: boolean, row?: HTMLElement|null}|null, onDragTarget?: (context: {row: HTMLElement, session: Record<string, any>, target: {id?: string|null, beforeId?: string|null, noOp?: boolean, position?: string, allowed?: boolean, row?: HTMLElement|null}|null}) => void, onDragMove?: (context: {row: HTMLElement, session: Record<string, any>, x: number, y: number, scrollTop?: number, scrollLeft?: number, dragStartScrollTop?: number, dragStartScrollLeft?: number}) => void, onDragEnd?: (context: {row: HTMLElement, session: Record<string, any>, target: {id?: string|null, beforeId?: string|null, noOp?: boolean, position?: string, allowed?: boolean, row?: HTMLElement|null}|null, event: PointerEvent}) => void, onCancel?: (context: {row: HTMLElement, session: Record<string, any>}) => void, getScrollContainer?: (context: {row: HTMLElement, session: Record<string, any>}) => HTMLElement|null, now?: () => number, longPressDuration?: number}} [options]
  */
 export function createGestureController(root, options = {}) {
   const config = { ...GESTURE_CONFIG, longPressDuration: options.longPressDuration ?? GESTURE_CONFIG.longPressDuration };
@@ -77,8 +77,11 @@ export function createGestureController(root, options = {}) {
     if (key) suppressedClicks.set(key, now() + 500);
   }
   function clearDragClasses() {
-    root.querySelectorAll?.('.drag-target, .category-drag-target, .dragging, .category-dragging, .long-pressed').forEach((element) => {
-      element.classList.remove('drag-target', 'category-drag-target', 'dragging', 'category-dragging', 'long-pressed');
+    root.querySelectorAll?.('.drag-target, .drag-target-before, .drag-target-after, .category-drag-target, .dragging, .category-dragging, .long-pressed').forEach((element) => {
+      element.classList.remove('drag-target', 'drag-target-before', 'drag-target-after', 'category-drag-target', 'dragging', 'category-dragging', 'long-pressed');
+      const htmlElement = /** @type {HTMLElement} */ (element);
+      htmlElement.style?.removeProperty?.('--drag-x');
+      htmlElement.style?.removeProperty?.('--drag-y');
     });
   }
   function clearSwipeVisual(record) {
@@ -111,6 +114,16 @@ export function createGestureController(root, options = {}) {
         keepRunning = scrollContainer.scrollTop !== before;
       }
       refreshDragTarget(record);
+      options.onDragMove?.({
+        row: record.row,
+        session: record.session,
+        x: record.session.lastX,
+        y: record.session.lastY,
+        scrollTop: scrollContainer.scrollTop ?? 0,
+        scrollLeft: scrollContainer.scrollLeft ?? 0,
+        dragStartScrollTop: record.dragStartScrollTop ?? 0,
+        dragStartScrollLeft: record.dragStartScrollLeft ?? 0,
+      });
       if (keepRunning) record.autoScrollFrame = requestAnimationFrame(tick);
     };
     record.autoScrollFrame = requestAnimationFrame(tick);
@@ -122,9 +135,15 @@ export function createGestureController(root, options = {}) {
   }
   function refreshDragTarget(record) {
     const target = options.resolveDragTarget?.({ row: record.row, session: record.session, x: record.session.lastX, y: record.session.lastY }) ?? null;
-    if (target?.row && !target.allowed) target.row.classList.remove('drag-target', 'category-drag-target');
-    root.querySelectorAll?.('.drag-target, .category-drag-target').forEach((element) => element.classList.remove('drag-target', 'category-drag-target'));
-    if (target?.row && target.allowed) target.row.classList.add(target.row.classList.contains('category-nav-row') ? 'category-drag-target' : 'drag-target');
+    if (target?.row && !target.allowed) target.row.classList.remove('drag-target', 'drag-target-before', 'drag-target-after', 'category-drag-target');
+    root.querySelectorAll?.('.drag-target, .drag-target-before, .drag-target-after, .category-drag-target').forEach((element) => element.classList.remove('drag-target', 'drag-target-before', 'drag-target-after', 'category-drag-target'));
+    if (target?.row && target.allowed) {
+      if (target.row.classList.contains('category-nav-row')) target.row.classList.add('category-drag-target');
+      else {
+        target.row.classList.add('drag-target');
+        target.row.classList.add(target.position === 'after' ? 'drag-target-after' : 'drag-target-before');
+      }
+    }
     record.target = target;
     options.onDragTarget?.({ row: record.row, session: record.session, target });
   }
@@ -185,13 +204,24 @@ export function createGestureController(root, options = {}) {
           return false;
         }
       }
+      record.dragStartScrollTop = record.scrollContainer?.scrollTop ?? 0;
+      record.dragStartScrollLeft = record.scrollContainer?.scrollLeft ?? 0;
       scheduleAutoScroll(record);
       return true;
     }
     if (effect.type === 'dragMove') {
       event?.preventDefault?.();
       refreshDragTarget(record);
-      options.onDragMove?.({ row: record.row, session: record.session, x: effect.x, y: effect.y });
+      options.onDragMove?.({
+        row: record.row,
+        session: record.session,
+        x: effect.x,
+        y: effect.y,
+        scrollTop: record.scrollContainer?.scrollTop ?? 0,
+        scrollLeft: record.scrollContainer?.scrollLeft ?? 0,
+        dragStartScrollTop: record.dragStartScrollTop ?? 0,
+        dragStartScrollLeft: record.dragStartScrollLeft ?? 0,
+      });
       scheduleAutoScroll(record);
       return true;
     }
@@ -230,8 +260,10 @@ export function createGestureController(root, options = {}) {
       record.session = result.session;
     }
     if (record.session.winner === 'swipe' || record.session.winner === 'rename') clearSwipeVisual(record);
-    record.row.classList.remove('drag-target', 'category-drag-target', 'dragging', 'category-dragging', 'long-pressed', 'is-swiping', 'swipe-left', 'swipe-right');
+    record.row.classList.remove('drag-target', 'drag-target-before', 'drag-target-after', 'category-drag-target', 'dragging', 'category-dragging', 'long-pressed', 'is-swiping', 'swipe-left', 'swipe-right');
     record.row.style?.removeProperty?.('--swipe-x');
+    record.row.style?.removeProperty?.('--drag-x');
+    record.row.style?.removeProperty?.('--drag-y');
     clearDragClasses();
     record.scrollContainer = null;
     sessions.delete(record.session.pointerId);

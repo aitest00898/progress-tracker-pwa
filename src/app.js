@@ -45,7 +45,7 @@ const ui = {
   search: '', tag: '', quickActionId: null, addChildFor: null, expanded: new Set(), focusRoot: null, notesTab: 'edit',
   modal: null, toast: null, importPreview: null, restorePreview: null, contextItemId: null, continuousCreate: true,
   dragItemId: null, dragCategoryId: null, selectedDeleted: new Set(), moveItemId: null, duplicateItemId: null,
-  dragTargetId: null,
+  dragTargetId: null, dragTargetPosition: null,
   routineSuggestionId: null, reminderCenter: false,
   highlightId: null,
 };
@@ -204,9 +204,11 @@ function clearFocus(categoryId) {
 }
 
 function clearGestureClasses() {
-  root?.querySelectorAll?.('.drag-target, .category-drag-target, .dragging, .category-dragging, .long-pressed, .is-swiping, .swipe-left, .swipe-right')?.forEach((element) => {
-    element.classList.remove('drag-target', 'category-drag-target', 'dragging', 'category-dragging', 'long-pressed', 'is-swiping', 'swipe-left', 'swipe-right');
+  root?.querySelectorAll?.('.drag-target, .drag-target-before, .drag-target-after, .category-drag-target, .dragging, .category-dragging, .long-pressed, .is-swiping, .swipe-left, .swipe-right')?.forEach((element) => {
+    element.classList.remove('drag-target', 'drag-target-before', 'drag-target-after', 'category-drag-target', 'dragging', 'category-dragging', 'long-pressed', 'is-swiping', 'swipe-left', 'swipe-right');
     (/** @type {HTMLElement} */ (element)).style.removeProperty('--swipe-x');
+    (/** @type {HTMLElement} */ (element)).style.removeProperty('--drag-x');
+    (/** @type {HTMLElement} */ (element)).style.removeProperty('--drag-y');
   });
 }
 
@@ -217,6 +219,7 @@ function clearTransientInteractionState({ preserveSelection = false } = {}) {
   ui.dragItemId = null;
   ui.dragCategoryId = null;
   ui.dragTargetId = null;
+  ui.dragTargetPosition = null;
   if (!preserveSelection) ui.selectedToday?.clear();
   clearGestureClasses();
 }
@@ -274,21 +277,84 @@ function handleGestureSwipe({ row, direction }) {
 function markDragSource(sourceId, category = false, active = true) {
   if (!sourceId) return;
   const selector = category ? `.category-nav-row[data-category-id="${CSS.escape(sourceId)}"]` : `.item-row[data-item-id="${CSS.escape(sourceId)}"]`;
-  root?.querySelector(selector)?.classList.toggle(category ? 'category-dragging' : 'dragging', active);
+  const element = /** @type {HTMLElement|null} */ (root?.querySelector(selector));
+  element?.classList.toggle(category ? 'category-dragging' : 'dragging', active);
+  if (active) {
+    element?.style.setProperty('--drag-x', '0px');
+    element?.style.setProperty('--drag-y', '0px');
+  } else {
+    element?.style.removeProperty('--drag-x');
+    element?.style.removeProperty('--drag-y');
+  }
+}
+
+function dragRowAtPoint(x, y, sourceRow) {
+  const pointed = document.elementFromPoint(x, y)?.closest?.('.item-row, .category-nav-row');
+  if (pointed && pointed !== sourceRow && root.contains(pointed)) return pointed;
+  const sourceIsCategory = sourceRow.classList.contains('category-nav-row');
+  const candidates = Array.from(root.querySelectorAll('.item-row, .category-nav-row'))
+    .filter((candidate) => candidate !== sourceRow && candidate.classList.contains('category-nav-row') === sourceIsCategory);
+  let nearest = null;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+  for (const candidate of candidates) {
+    const rect = candidate.getBoundingClientRect?.();
+    if (!rect || !Number.isFinite(rect.top) || !Number.isFinite(rect.bottom)) continue;
+    const distance = y < rect.top ? rect.top - y : y > rect.bottom ? y - rect.bottom : 0;
+    if (distance < nearestDistance) { nearest = candidate; nearestDistance = distance; }
+  }
+  return nearestDistance <= 48 ? nearest : null;
+}
+
+function insertionPosition(row, y) {
+  const rect = row?.getBoundingClientRect?.();
+  if (!rect || !Number.isFinite(rect.top) || !Number.isFinite(rect.height) || rect.height <= 0) return 'before';
+  return y < rect.top + rect.height / 2 ? 'before' : 'after';
+}
+
+function insertionBeforeId(orderedIds, sourceId, targetId, position) {
+  const original = orderedIds.filter((id) => id !== sourceId);
+  const targetIndex = original.indexOf(targetId);
+  if (targetIndex < 0) return { beforeId: targetId, noOp: false };
+  const insertIndex = position === 'after' ? targetIndex + 1 : targetIndex;
+  const beforeId = original[insertIndex] ?? null;
+  const projected = [...original];
+  projected.splice(insertIndex, 0, sourceId);
+  const noOp = projected.length === orderedIds.length && projected.every((id, index) => id === orderedIds[index]);
+  return { beforeId, noOp };
+}
+
+function orderedSiblingIds(state, item) {
+  const orderField = item.status === 'completed' ? 'completedOrder' : 'activeOrder';
+  return state.items
+    .filter((candidate) => candidate.categoryId === item.categoryId && candidate.parentId === item.parentId && candidate.status === item.status)
+    .sort((a, b) => Number(a[orderField] ?? 0) - Number(b[orderField] ?? 0) || a.id.localeCompare(b.id))
+    .map((candidate) => candidate.id);
+}
+
+function orderedCategoryIds(state) {
+  return [...state.categories].sort((a, b) => Number(a.order ?? 0) - Number(b.order ?? 0) || a.id.localeCompare(b.id)).map((category) => category.id);
 }
 
 function resolveDragTarget({ row, session, x, y }) {
-  const target = /** @type {HTMLElement|null} */ (document.elementFromPoint(x, y)?.closest?.('.item-row, .category-nav-row'));
+  const target = /** @type {HTMLElement|null} */ (dragRowAtPoint(x, y, row));
   if (!target || target === row) return null;
   if (target.classList.contains('category-nav-row') !== row.classList.contains('category-nav-row')) return null;
-  if (target.classList.contains('category-nav-row')) return { id: target.dataset.categoryId, allowed: true, row: target };
-  const source = getItem(currentState(), session.sourceId, renderIndex(currentState()));
-  const targetItem = getItem(currentState(), target.dataset.itemId, renderIndex(currentState()));
+  const state = currentState();
+  const position = insertionPosition(target, y);
+  if (target.classList.contains('category-nav-row')) {
+    const placement = insertionBeforeId(orderedCategoryIds(state), session.sourceId, target.dataset.categoryId, position);
+    return { id: target.dataset.categoryId, beforeId: placement.beforeId, noOp: placement.noOp, position, allowed: true, row: target };
+  }
+  const index = renderIndex(state);
+  const source = getItem(state, session.sourceId, index);
+  const targetItem = getItem(state, target.dataset.itemId, index);
   const mode = session.smartView ? 'smart' : 'tree';
-  const validation = validateReorderTarget({ source: source && { ...source, conflicted: itemHasConflict(currentState(), source.id) }, target: targetItem && { ...targetItem, conflicted: itemHasConflict(currentState(), targetItem.id) }, mode });
-  const smartItems = mode === 'smart' ? smartViewItems(currentState(), session.smartView) : [];
+  const validation = validateReorderTarget({ source: source && { ...source, conflicted: itemHasConflict(state, source.id) }, target: targetItem && { ...targetItem, conflicted: itemHasConflict(state, targetItem.id) }, mode });
+  const smartItems = mode === 'smart' ? smartViewItems(state, session.smartView) : [];
   const smartAllowed = mode !== 'smart' || (source?.status === targetItem?.status && smartItems.some((candidate) => candidate.id === source?.id) && smartItems.some((candidate) => candidate.id === targetItem?.id));
-  return { id: targetItem?.id ?? null, allowed: validation.ok && smartAllowed, row: target };
+  const orderedIds = mode === 'smart' ? smartItems.map((candidate) => candidate.id) : source ? orderedSiblingIds(state, source) : [];
+  const placement = source && targetItem ? insertionBeforeId(orderedIds, source.id, targetItem.id, position) : { beforeId: targetItem?.id ?? null, noOp: false };
+  return { id: targetItem?.id ?? null, beforeId: placement.beforeId, noOp: placement.noOp, position, allowed: validation.ok && smartAllowed, row: target };
 }
 
 function handleDragStart({ row, session }) {
@@ -310,19 +376,29 @@ function handleDragStart({ row, session }) {
 
 function handleDragTarget({ target }) {
   ui.dragTargetId = target?.allowed ? target.id ?? null : null;
+  ui.dragTargetPosition = target?.allowed ? target.position ?? 'before' : null;
+}
+
+function handleDragMove({ row, session, x, y, scrollTop = 0, scrollLeft = 0, dragStartScrollTop = 0, dragStartScrollLeft = 0 }) {
+  if (!row || !session) return;
+  const dx = x - session.startX + (scrollLeft - dragStartScrollLeft);
+  const dy = y - session.startY + (scrollTop - dragStartScrollTop);
+  row.style.setProperty('--drag-x', `${dx}px`);
+  row.style.setProperty('--drag-y', `${dy}px`);
 }
 
 function handleDragEnd({ row, session, target }) {
   const sourceId = session.sourceId;
   const targetId = target?.allowed ? target.id : null;
+  const beforeId = target?.allowed ? (target.beforeId ?? target.id) : null;
   const category = rowCategory(row);
-  ui.dragItemId = null; ui.dragCategoryId = null; ui.dragTargetId = null;
+  ui.dragItemId = null; ui.dragCategoryId = null; ui.dragTargetId = null; ui.dragTargetPosition = null;
   markDragSource(sourceId, Boolean(category), false);
-  if (!sourceId || !targetId || sourceId === targetId) return;
+  if (!sourceId || !targetId || sourceId === targetId || target?.noOp) return;
   if (category) {
     const targetCategory = getCategory(currentState(), targetId, renderIndex(currentState()));
     if (!targetCategory) return;
-    void mutate('category_reorder', (draft) => reorderCategories(draft, sourceId, targetId), 'categoryReordered');
+    void mutate('category_reorder', (draft) => reorderCategories(draft, sourceId, beforeId), 'categoryReordered');
     return;
   }
   const state = currentState();
@@ -333,8 +409,8 @@ function handleDragEnd({ row, session, target }) {
   const smartItems = mode === 'smart' ? smartViewItems(state, session.smartView) : [];
   const smartAllowed = mode !== 'smart' || (source?.status === destination?.status && smartItems.some((candidate) => candidate.id === source?.id) && smartItems.some((candidate) => candidate.id === destination?.id));
   if (!validation.ok || !smartAllowed) { if (validation.reason === 'conflict') blockConflictedEdit(); return; }
-  if (mode === 'smart') void mutate('smart_reorder', (draft) => reorderSmartView(draft, session.smartView, sourceId, targetId), 'itemOrderSaved');
-  else void mutate('reorder_siblings', (draft) => reorderSiblings(draft, sourceId, targetId), 'itemOrderSaved');
+  if (mode === 'smart') void mutate('smart_reorder', (draft) => reorderSmartView(draft, session.smartView, sourceId, beforeId), 'itemOrderSaved');
+  else void mutate('reorder_siblings', (draft) => reorderSiblings(draft, sourceId, beforeId), 'itemOrderSaved');
 }
 
 function installGestureController() {
@@ -366,8 +442,9 @@ function installGestureController() {
     onDragStart: handleDragStart,
     resolveDragTarget,
     onDragTarget: handleDragTarget,
+    onDragMove: handleDragMove,
     onDragEnd: handleDragEnd,
-    onCancel: ({ row, session }) => { ui.dragItemId = null; ui.dragCategoryId = null; ui.dragTargetId = null; markDragSource(session.sourceId, row.classList.contains('category-nav-row'), false); },
+    onCancel: ({ row, session }) => { ui.dragItemId = null; ui.dragCategoryId = null; ui.dragTargetId = null; ui.dragTargetPosition = null; markDragSource(session.sourceId, row.classList.contains('category-nav-row'), false); },
     getScrollContainer: ({ row }) => /** @type {HTMLElement|null} */ (row.closest('.virtual-viewport, .today-list, .category-list') ?? document.scrollingElement),
   });
 }
@@ -741,8 +818,9 @@ function renderItemRow(state, item, { depth = 0, sourceDepth = depth, maxDepth =
   const endControls = node('div', { class: 'row-end-controls', 'data-gesture-zone': GESTURE_ZONES.body }, quickTrigger, chevron);
   const main = node('div', { class: `item-row-main ${showRing ? 'parent' : 'leaf'} ${semantics.isTreeRow ? 'tree-row-main' : ''}`, 'data-gesture-zone': GESTURE_ZONES.body }, handle, showRing ? ring : statusButton, info, endControls);
   const actionRow = node('div', { class: 'item-actions', 'data-gesture-zone': GESTURE_ZONES.control }, button(item.status === 'completed' ? tr('reopen') : item.status === 'skipped' ? tr('unskip') : tr('complete'), () => conflict ? blockConflictedEdit() : performStatus(item, nextStatus), { className: 'row-action', icon: item.status === 'completed' ? '↺' : '✓' }), button(tr('addChild'), () => conflict ? blockConflictedEdit() : (ui.quickActionId = item.id, ui.addChildFor = item.id, scheduleRender()), { className: 'row-action', icon: '+' }), button(state.today.items[item.id] ? tr('removeFromToday') : tr('moveToToday'), () => conflict ? blockConflictedEdit() : toggleToday(item), { className: 'row-action', icon: '◷' }), iconButton('⋯', tr('more'), (event) => { stop(event); if (conflict) blockConflictedEdit(); else openItemMenu(item); }, { className: 'row-action-more' }));
+  const insertionIndicator = node('div', { class: 'drag-insertion-indicator', ariaHidden: 'true' });
   const swipeBackground = node('div', { class: 'swipe-action-background', 'aria-hidden': 'true' }, node('span', { class: 'swipe-action-left' }, item.status === 'completed' ? tr('reopen') : tr('complete')), node('span', { class: 'swipe-action-right' }, tr('delete')));
-  row.append(swipeBackground, main, actionRow);
+  row.append(swipeBackground, main, actionRow, insertionIndicator);
   if (ui.quickActionId === item.id) row.append(renderQuickActionRow(state, item));
   return row;
 }
