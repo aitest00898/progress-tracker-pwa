@@ -1,4 +1,4 @@
-const CACHE = 'progress-tracker-v19';
+const CACHE = 'progress-tracker-v20';
 const INDEX_URL = './index.html';
 const ROOT_URL = './';
 const STATIC_SHELL = [
