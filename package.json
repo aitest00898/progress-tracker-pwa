@@ -10,11 +10,16 @@
     "preview": "vite preview",
     "test": "node --test test/*.test.mjs",
     "benchmark": "node scripts/benchmark.mjs",
+    "syntax-check": "node scripts/syntax-check.mjs",
     "lint": "node scripts/lint.mjs",
-    "typecheck": "node scripts/typecheck.mjs",
-    "verify": "npm run lint && npm run typecheck && npm test && npm run build"
+    "typecheck": "tsc --noEmit",
+    "module-smoke": "node scripts/module-smoke.mjs",
+    "verify": "npm run syntax-check && npm run lint && npm run typecheck && npm run module-smoke && npm test && npm run build"
   },
   "devDependencies": {
+    "eslint": "^9.39.5",
+    "globals": "^16.5.0",
+    "typescript": "^5.9.3",
     "vite": "^7.1.2"
   },
   "engines": {

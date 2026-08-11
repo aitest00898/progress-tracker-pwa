@@ -16,6 +16,7 @@ function itemAtOffset(offsets, value) {
 }
 
 export class VirtualList {
+  /** @param {HTMLElement} container @param {{rowHeight?: number, overscan?: number, renderRow?: (item: any, index: number) => HTMLElement, empty?: () => Node, itemMetrics?: (item: any, index: number) => {height?: number, gap?: number}|null}} [options] */
   constructor(container, { rowHeight = 82, overscan = 8, renderRow, empty, itemMetrics = null } = {}) {
     this.container = container;
     this.rowHeight = rowHeight;
@@ -112,6 +113,7 @@ export class VirtualList {
     this.viewport.replaceChildren(fragment);
   }
 
+  /** @param {number} index @param {ScrollBehavior} [behavior] */
   scrollToIndex(index, behavior = 'smooth') {
     if (index < 0 || index >= this.items.length) return;
     this.viewport.scrollTo({ top: this.metrics ? this.offsets[index] : index * this.rowHeight, behavior });

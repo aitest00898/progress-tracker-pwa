@@ -1,5 +1,7 @@
 import { makeEmptyState, normalizeState } from './schema.js';
 
+/** @typedef {import('./types.js').AppState} AppState */
+
 export const DB_NAME = 'progress-tracker-local';
 export const DB_VERSION = 1;
 export const STORE_NAMES = ['meta', 'categories', 'items', 'history', 'reminders', 'today', 'settings', 'smartOrders', 'syncChanges', 'conflicts', 'conflictArchive', 'deleted', 'backupMeta', 'migrationSnapshots', 'recoverySnapshots', 'diagnostics', 'performance', 'capabilities'];
@@ -69,6 +71,7 @@ export function planStateChanges(beforeState, afterState) {
   return { stores, putCount, deleteCount, operationCount: putCount + deleteCount };
 }
 
+/** @param {IDBDatabase} db @returns {Promise<AppState>} */
 export function loadState(db) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAMES, 'readonly');
@@ -113,6 +116,7 @@ export function loadState(db) {
   });
 }
 
+/** @param {IDBDatabase} db @param {AppState|Record<string, any>} inputState @returns {Promise<unknown>} */
 export function saveState(db, inputState) {
   return new Promise((resolve, reject) => {
     const state = normalizeState(inputState);
@@ -134,6 +138,7 @@ export function saveState(db, inputState) {
   });
 }
 
+/** @param {IDBDatabase} db @param {AppState} beforeState @param {AppState} afterState @returns {Promise<unknown>} */
 export function saveStateChanges(db, beforeState, afterState) {
   const plan = planStateChanges(beforeState, afterState);
   const stores = Object.keys(plan.stores);

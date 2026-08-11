@@ -7,8 +7,9 @@ import {
 } from '../src/engine.js';
 import {
   canPushState, coalescePendingChanges, datasetSwitchGate, enqueueLocalChange,
-  GoogleDriveSync, mergeDatasets, prepareDatasetSwitch, resolveConflict,
+  GoogleDriveSync, mergeDatasets, prepareDatasetSwitch, resolveConflict, conflictArchiveRestorePreview, restoreConflictArchive,
 } from '../src/sync.js';
+import { ProgressRepository } from '../src/storage.js';
 
 const at = '2026-08-10T09:00:00.000Z';
 function branch() { const s = makeEmptyState(at); const item = createItem(s, { categoryId: s.categories[0].id, title: 'Shared' }, at).item; return { s, item }; }
@@ -33,6 +34,90 @@ test('conflict resolution archives rejected state and unrelated items continue',
   const beforeRevision = result.state.items.find((item) => item.id === id).revision;
   const resolved = resolveConflict(result.state, conflict.id, 'local', at); assert.equal(resolved.ok, true); assert.equal(result.state.items.find((item) => item.id === id).notes, 'local'); assert.ok(result.state.items.find((item) => item.id === id).revision > beforeRevision); assert.ok(result.state.history.some((entry) => entry.itemId === id && entry.type === 'conflict_resolved')); assert.equal(result.state.conflictArchive.length, 1); assert.equal(result.state.items.find((item) => item.id === unrelated.id).priority, 'high');
   const changes = coalescePendingChanges([{ id: '1', coalesceKey: 'item', label: 'edit', revision: 1 }, { id: '2', coalesceKey: 'item', label: 'notes', revision: 2 }]); assert.equal(changes.length, 1); assert.deepEqual(changes[0].labels, ['edit', 'notes']);
+});
+
+test('field conflict restore changes only the rejected field and preserves later edits', () => {
+  const base = branch().s; const item = base.items[0]; const local = structuredClone(base); const remote = structuredClone(base);
+  setDue(local, item.id, { mode: 'explicit', date: '2026-08-20T12:00:00.000Z' }, at);
+  setDue(remote, item.id, { mode: 'explicit', date: '2026-08-25T12:00:00.000Z' }, at);
+  const merged = mergeDatasets(base, local, remote); merged.state.conflicts = merged.conflicts;
+  const conflict = merged.conflicts.find((candidate) => candidate.itemId === item.id && candidate.field === 'dueDate');
+  assert.equal(resolveConflict(merged.state, conflict.id, 'local', at).ok, true);
+  const resolvedItem = merged.state.items.find((candidate) => candidate.id === item.id);
+  setPriority(merged.state, item.id, 'high', '2026-08-11T09:00:00.000Z');
+  setNotes(merged.state, item.id, '後續備註', '2026-08-12T09:00:00.000Z');
+  const archive = merged.state.conflictArchive.find((candidate) => candidate.field === 'dueDate');
+  const preview = conflictArchiveRestorePreview(merged.state, archive.id, '2026-08-15T09:00:00.000Z');
+  assert.equal(preview.ok, true); assert.equal(preview.changes.length, 1); assert.equal(preview.changes[0].field, 'dueDate');
+  const beforeRevision = resolvedItem.revision;
+  const restored = restoreConflictArchive(merged.state, archive.id, '2026-08-15T09:00:00.000Z');
+  const afterItem = merged.state.items.find((candidate) => candidate.id === item.id);
+  assert.equal(restored.ok, true); assert.equal(afterItem.dueDate, '2026-08-25T12:00:00.000Z'); assert.equal(afterItem.priority, 'high'); assert.equal(afterItem.notes, '後續備註');
+  assert.ok(afterItem.revision > beforeRevision); assert.equal(merged.state.conflictArchive[0].restoreCount, 1); assert.ok(merged.state.conflictArchive[0].latestRestoreRevision);
+  assert.ok(merged.state.history.some((entry) => entry.itemId === item.id && entry.type === 'conflict_archive_restored'));
+});
+
+test('archive restore through the repository creates a new revision and pending sync change', async () => {
+  const base = branch().s; const item = base.items[0]; const local = structuredClone(base); const remote = structuredClone(base);
+  setDue(local, item.id, { mode: 'explicit', date: '2026-08-20T12:00:00.000Z' }, at);
+  setDue(remote, item.id, { mode: 'explicit', date: '2026-08-25T12:00:00.000Z' }, at);
+  const merged = mergeDatasets(base, local, remote); merged.state.conflicts = merged.conflicts;
+  const conflict = merged.conflicts.find((candidate) => candidate.field === 'dueDate');
+  resolveConflict(merged.state, conflict.id, 'local', at);
+  const archive = merged.state.conflictArchive[0];
+  const repository = new ProgressRepository();
+  repository.state = merged.state;
+  repository.volatile = true;
+  const beforeRevision = repository.state.meta.revision;
+  const result = await repository.update('conflict_archive_restored', (draft) => restoreConflictArchive(draft, archive.id, '2026-08-15T09:00:00.000Z'));
+  assert.equal(result.ok, true);
+  assert.ok(result.state.meta.revision > beforeRevision);
+  assert.ok(result.state.syncChanges.some((change) => change.label === 'conflict_archive_restored'));
+  assert.equal(result.state.items.find((candidate) => candidate.id === item.id).dueDate, '2026-08-25T12:00:00.000Z');
+});
+
+test('parent conflict restore is cycle-safe and applies only the archived relationship', () => {
+  const base = branch().s; const moved = base.items[0]; const left = createItem(base, { categoryId: base.categories[0].id, title: 'Left' }, at).item; const right = createItem(base, { categoryId: base.categories[0].id, title: 'Right' }, at).item;
+  const local = structuredClone(base); const remote = structuredClone(base);
+  local.items.find((item) => item.id === moved.id).parentId = left.id; remote.items.find((item) => item.id === moved.id).parentId = right.id;
+  const merged = mergeDatasets(base, local, remote); merged.state.conflicts = merged.conflicts;
+  const conflict = merged.conflicts.find((candidate) => candidate.type === 'parent' && candidate.itemId === moved.id);
+  assert.equal(resolveConflict(merged.state, conflict.id, 'local', at).ok, true);
+  const archive = merged.state.conflictArchive.find((candidate) => candidate.type === 'parent');
+  assert.equal(conflictArchiveRestorePreview(merged.state, archive.id, '2026-08-15T09:00:00.000Z').ok, true);
+  assert.equal(restoreConflictArchive(merged.state, archive.id, '2026-08-15T09:00:00.000Z').ok, true);
+  assert.equal(merged.state.items.find((item) => item.id === moved.id).parentId, right.id);
+  const invalidArchive = merged.state.conflictArchive.find((candidate) => candidate.id === archive.id);
+  invalidArchive.rejectedState = { categoryId: moved.categoryId, parentId: moved.id };
+  assert.equal(conflictArchiveRestorePreview(merged.state, invalidArchive.id, '2026-08-16T09:00:00.000Z').reason, 'cycle');
+});
+
+test('order conflict restore is deterministic and fails closed when the sibling set changed', () => {
+  const base = branch().s; const second = createItem(base, { categoryId: base.categories[0].id, title: 'Second' }, at).item; const third = createItem(base, { categoryId: base.categories[0].id, title: 'Third' }, at).item; const id = base.items[0].id;
+  const local = structuredClone(base); const remote = structuredClone(base);
+  local.items.find((item) => item.id === id).activeOrder = 2; local.items.find((item) => item.id === second.id).activeOrder = 0; local.items.find((item) => item.id === third.id).activeOrder = 1;
+  remote.items.find((item) => item.id === id).activeOrder = 1; remote.items.find((item) => item.id === second.id).activeOrder = 2; remote.items.find((item) => item.id === third.id).activeOrder = 0;
+  const merged = mergeDatasets(base, local, remote); merged.state.conflicts = merged.conflicts;
+  const conflict = merged.conflicts.find((candidate) => candidate.entityType === 'sibling_order');
+  assert.equal(resolveConflict(merged.state, conflict.id, 'local', at).ok, true);
+  const archive = merged.state.conflictArchive[0];
+  assert.equal(restoreConflictArchive(merged.state, archive.id, '2026-08-15T09:00:00.000Z').ok, true);
+  const order = merged.state.items.filter((item) => item.parentId === null).sort((a, b) => a.activeOrder - b.activeOrder).map((item) => item.id);
+  assert.deepEqual(order, archive.rejectedState);
+  merged.state.items.push(createItem(merged.state, { categoryId: merged.state.categories[0].id, title: 'New sibling' }, at).item);
+  assert.equal(conflictArchiveRestorePreview(merged.state, archive.id, '2026-08-16T09:00:00.000Z').reason, 'order_target_changed');
+});
+
+test('conflict archive restore fails closed for missing targets and expired archives', () => {
+  const base = branch().s; const item = base.items[0]; const local = structuredClone(base); const remote = structuredClone(base);
+  setNotes(local, item.id, 'local', at); setNotes(remote, item.id, 'remote', at);
+  const merged = mergeDatasets(base, local, remote); merged.state.conflicts = merged.conflicts;
+  const conflict = merged.conflicts.find((candidate) => candidate.field === 'notes'); resolveConflict(merged.state, conflict.id, 'local', at);
+  const archive = merged.state.conflictArchive[0];
+  merged.state.items = merged.state.items.filter((candidate) => candidate.id !== item.id);
+  assert.equal(conflictArchiveRestorePreview(merged.state, archive.id, '2026-08-15T09:00:00.000Z').reason, 'missing_target');
+  merged.state.items.push(item); archive.purgeAfter = '2026-08-01T00:00:00.000Z';
+  assert.equal(conflictArchiveRestorePreview(merged.state, archive.id, '2026-08-15T09:00:00.000Z').reason, 'expired');
 });
 
 test('Smart View reorder has an independent order and does not mutate tree order', () => {
@@ -232,7 +317,7 @@ test('stale persisted Drive fileId falls back to a fresh exact dataset lookup', 
 
 test('Drive treats a list containing only deleted files as empty and blocks push to a wrong dataset file', async () => {
   let mocked = mockDrive(() => jsonResponse({ files: [{ id: 'deleted-file', trashed: true, appProperties: { datasetId: 'dataset-a' } }] }));
-  let result = await mocked.drive.pull('dataset-a');
+  const result = await mocked.drive.pull('dataset-a');
   assert.equal(result.status, 'empty');
   const state = makeEmptyState(at);
   state.meta.datasetId = 'dataset-a';

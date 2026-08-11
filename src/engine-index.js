@@ -36,5 +36,6 @@ export function createEngineIndex(state) {
     plannedStartByItem: new Map(),
     pathByItem: new Map(),
     progressByItem: new Map(),
+    progressResultByItem: new Map(),
   };
 }

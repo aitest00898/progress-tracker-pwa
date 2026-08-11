@@ -2,6 +2,7 @@ function bytes(value) {
   return new TextEncoder().encode(JSON.stringify(value ?? null)).byteLength;
 }
 
+/** @param {import('./types.js').AppState} state @returns {{breakdown:Record<string, number>, total:number, method:string}} */
 export function storageBreakdown(state) {
   const basicItems = (state.items ?? []).map(({ notes: _notes, tags: _tags, ...item }) => item);
   const notes = (state.items ?? []).filter((item) => item.notes).map((item) => ({ itemId: item.id, notes: item.notes }));

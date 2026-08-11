@@ -1,5 +1,8 @@
 import { clone, dateKey, isoNow, makeCategory, makeItem, newId, normalizeState, validateState } from './schema.js';
-import { ancestorsOf, descendantsOf, getCategory, getItem, pathString } from './engine.js';
+import { descendantsOf, getItem } from './engine.js';
+
+/** @typedef {import('./types.js').AppState} AppState */
+/** @typedef {import('./types.js').PTMDParseResult} PTMDParseResult */
 
 export const PTMD_VERSION = 1;
 
@@ -35,7 +38,7 @@ function treeOrder(state, roots) {
   const visit = (item, depth) => {
     rows.push({ item, depth });
     const children = state.items.filter((candidate) => candidate.parentId === item.id && candidate.categoryId === item.categoryId)
-      .sort((a, b) => (a.status === 'completed') - (b.status === 'completed') || (a.status === 'skipped') - (b.status === 'skipped') || (a.activeOrder ?? 0) - (b.activeOrder ?? 0));
+      .sort((a, b) => Number(a.status === 'completed') - Number(b.status === 'completed') || Number(a.status === 'skipped') - Number(b.status === 'skipped') || Number(a.activeOrder ?? 0) - Number(b.activeOrder ?? 0));
     for (const child of children) visit(child, depth + 1);
   };
   for (const root of roots) visit(root, 0);
@@ -78,6 +81,7 @@ function subsetState(state, scope, targetId) {
   return result;
 }
 
+/** @param {AppState} inputState @param {{scope?:string,targetId?:string|null,exportedAt?:string,timezone?:string}} [options] @returns {string} */
 export function exportPTMD(inputState, { scope = 'full', targetId = null, exportedAt = isoNow(), timezone = Intl.DateTimeFormat().resolvedOptions().timeZone } = {}) {
   const state = subsetState(inputState, scope, targetId);
   const lines = [formatFrontmatter({ exportedAt, timezone, scope })];
@@ -87,7 +91,7 @@ export function exportPTMD(inputState, { scope = 'full', targetId = null, export
   for (const category of [...state.categories].sort((a, b) => a.order - b.order)) {
     lines.push('', `# ${category.title}`, `<!-- pt:category ${JSON.stringify({ id: category.id, order: category.order, createdAt: category.createdAt })} -->`);
     const roots = state.items.filter((item) => item.categoryId === category.id && item.parentId === null)
-      .sort((a, b) => (a.status === 'completed') - (b.status === 'completed') || (a.status === 'skipped') - (b.status === 'skipped') || (a.activeOrder ?? 0) - (b.activeOrder ?? 0));
+      .sort((a, b) => Number(a.status === 'completed') - Number(b.status === 'completed') || Number(a.status === 'skipped') - Number(b.status === 'skipped') || Number(a.activeOrder ?? 0) - Number(b.activeOrder ?? 0));
     appendTree(state, lines, category.id, roots);
   }
   if (scope !== 'full') lines.push('', `<!-- pt:scope ${JSON.stringify({ scope, targetId, exportedAt })} -->`);
@@ -115,6 +119,7 @@ function safeJSON(value) {
   try { return JSON.parse(value); } catch { return null; }
 }
 
+/** @param {string} text @returns {PTMDParseResult} */
 export function parsePTMD(text) {
   if (typeof text !== 'string' || !text.trim()) return { ok: false, reason: 'malformed' };
   const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/);
@@ -191,16 +196,18 @@ function nodeSourceKey(node, index) {
   return node.id ?? node.sourceKey ?? `${node.categoryTitle}:${node.depth}:${node.title}:${index}`;
 }
 
+/** @param {AppState} inputState @param {PTMDParseResult} parsed @param {{language?:string,now?:string}} [options] */
 export function previewImport(inputState, parsed, { language = 'zh-TW', now = isoNow() } = {}) {
   if (!parsed?.ok) return { ok: false, reason: parsed?.reason ?? 'malformed' };
   const currentIds = new Set(inputState.items.map((item) => item.id));
   const currentCategoryIds = new Set(inputState.categories.map((category) => category.id));
-  const importedNodes = flattenNodes(parsed.categories);
+  const categories = parsed.categories ?? [];
+  const importedNodes = flattenNodes(categories);
   const skipped = importedNodes.filter((node) => node.id && currentIds.has(node.id));
   const pending = importedNodes.filter((node) => !node.id || !currentIds.has(node.id));
   const categoryMap = new Map();
   const newCategories = [];
-  for (const category of parsed.categories) {
+  for (const category of categories) {
     const id = category.id ?? newId('cat');
     if (currentCategoryIds.has(id)) categoryMap.set(category.title, id);
     else {
@@ -274,6 +281,7 @@ export function previewImport(inputState, parsed, { language = 'zh-TW', now = is
   return preview;
 }
 
+/** @param {AppState} state @param {Record<string, any>} preview @param {string} [at] */
 export function applyImportPreview(state, preview, at = isoNow()) {
   if (!preview?.ok) return { ok: false, reason: 'invalid_preview' };
   const next = clone(state);

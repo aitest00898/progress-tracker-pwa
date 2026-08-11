@@ -20,6 +20,7 @@
           const dark = shell.theme === 'dark' || (shell.theme !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
           document.documentElement.lang = english ? 'en' : 'zh-Hant-TW';
           document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+          document.querySelector('meta[name="theme-color"]').content = dark ? '#0b0b0f' : '#f2f2f7';
           document.title = english ? 'Progress Tracker' : '進度追蹤器';
           document.querySelector('meta[name="apple-mobile-web-app-title"]').content = english ? 'Progress Tracker' : '進度追蹤器';
           document.querySelector('meta[name="description"]').content = english

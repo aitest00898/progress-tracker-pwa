@@ -4,7 +4,10 @@ const modules = ['appearance.js', 'schema.js', 'engine-index.js', 'engine.js', '
 let failed = false;
 for (const module of modules) {
   const result = spawnSync(process.execPath, ['-e', `import('./src/${module}').then(() => process.exit(0)).catch((error) => { console.error(error); process.exit(1); })`], { encoding: 'utf8' });
-  if (result.status !== 0) { failed = true; process.stderr.write(result.stderr || result.stdout); }
+  if (result.status !== 0) {
+    failed = true;
+    process.stderr.write(result.stderr || result.stdout);
+  }
 }
 if (failed) process.exit(1);
-console.log(`typecheck ok: ${modules.length} domain modules imported successfully`);
+console.log(`module-smoke ok: ${modules.length} domain modules imported successfully`);

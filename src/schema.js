@@ -13,6 +13,7 @@ export function isoNow() {
   return new Date().toISOString();
 }
 
+/** @param {Date|string|number} [value] @returns {string} */
 export function dateKey(value = new Date()) {
   const date = value instanceof Date ? value : new Date(value);
   const year = date.getFullYear();
@@ -175,7 +176,14 @@ export function normalizeState(input, now = isoNow()) {
   state.smartOrders = { ...(state.smartOrders ?? {}) };
   state.syncChanges = Array.isArray(state.syncChanges) ? state.syncChanges : [];
   state.conflicts = Array.isArray(state.conflicts) ? state.conflicts : [];
-  state.conflictArchive = Array.isArray(state.conflictArchive) ? state.conflictArchive : [];
+  state.conflictArchive = Array.isArray(state.conflictArchive) ? state.conflictArchive.map((entry) => ({
+    ...entry,
+    baseState: Object.prototype.hasOwnProperty.call(entry, 'baseState') ? entry.baseState : null,
+    restoreFields: Array.isArray(entry.restoreFields) ? [...new Set(entry.restoreFields.map((field) => String(field)))] : (entry.field ? [String(entry.field)] : []),
+    restoredAt: entry.restoredAt ?? null,
+    restoreCount: Number(entry.restoreCount ?? 0),
+    latestRestoreRevision: entry.latestRestoreRevision ?? null,
+  })) : [];
   state.deleted = Array.isArray(state.deleted) ? state.deleted : [];
   state.backupMeta = Array.isArray(state.backupMeta) ? state.backupMeta : [];
   state.migrationSnapshots = Array.isArray(state.migrationSnapshots) ? state.migrationSnapshots : [];

@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { makeEmptyState, normalizeState } from '../src/schema.js';
 import {
   addReminder, addToToday, applyDailyRollover, canMove, childrenOf, completionNeedsConfirmation, createCategory, createItem,
-  derivedTodayItems, duplicateSubtree, effectiveDue, effectivePlannedStart, moveImpact, moveSubtree, progressForItem, reminderOccurrence,
-  reminderState, removeFromToday, restoreDeleted, setDue, setImportance, setItemStatus, setPriority, softDeleteItem,
+  derivedTodayItems, duplicateSubtree, effectiveDue, effectivePlannedStart, formatProgress, moveImpact, moveSubtree, progressForItem, progressResultForItem, reminderOccurrence,
+  reminderState, removeFromToday, restoreDeleted, setDue, setImportance, setItemStatus, softDeleteItem,
   snoozeReminder, dueImpactOnRemoval, smartViewItems, reminderPatternSuggestion,
 } from '../src/engine.js';
 
@@ -79,6 +79,65 @@ test('progress uses recursive weighted averages, excludes skipped children, and 
   setItemStatus(s, b.id, 'completed', { force: true, at });
   assert.equal(progressForItem(s, parent.id), 100);
   assert.equal(s.items.find((item) => item.id === parent.id).status, 'active');
+});
+
+test('progress keeps raw precision for 2000 children and never displays rounded incomplete work as 100%', () => {
+  const s = state(); const parent = add(s, '大量子項目');
+  for (let index = 0; index < 2000; index += 1) {
+    const child = add(s, `子項目 ${index}`, parent.id);
+    if (index < 1999) setItemStatus(s, child.id, 'completed', { force: true, at });
+  }
+  const result = progressResultForItem(s, parent.id);
+  assert.ok(result.raw < 100);
+  assert.equal(result.complete, false);
+  assert.equal(formatProgress(result.raw, result.complete), 99.9);
+  assert.equal(smartViewItems(s, 'readyToClose', new Date(at)).some((item) => item.id === parent.id), false);
+  assert.equal(s.items.find((item) => item.id === parent.id).status, 'active');
+});
+
+test('all effective children can reach raw 100 without auto-completing the parent', () => {
+  const s = state(); const parent = add(s, '全部完成'); const child = add(s, '子項目', parent.id);
+  setItemStatus(s, child.id, 'completed', { force: true, at });
+  const result = progressResultForItem(s, parent.id);
+  assert.equal(result.raw, 100);
+  assert.equal(result.complete, true);
+  assert.equal(formatProgress(result.raw, result.complete), 100);
+  assert.equal(s.items.find((item) => item.id === parent.id).status, 'active');
+  assert.equal(smartViewItems(s, 'readyToClose', new Date(at)).some((item) => item.id === parent.id), true);
+});
+
+test('deep weighted progress remains incomplete when one bottom-level node is active', () => {
+  const s = state(); let parent = add(s, '深層根');
+  for (let depth = 1; depth <= 5; depth += 1) {
+    const next = add(s, `深度 ${depth}`, parent.id);
+    const completed = add(s, `完成分支 ${depth}`, parent.id);
+    setImportance(s, completed.id, depth % 4, at);
+    setItemStatus(s, completed.id, 'completed', { force: true, at });
+    parent = next;
+  }
+  const activeLeaf = add(s, '底層尚未完成', parent.id);
+  setImportance(s, activeLeaf.id, 3, at);
+  let cursor = s.items.find((item) => item.title === '深層根');
+  for (let depth = 0; depth < 6; depth += 1) {
+    const result = progressResultForItem(s, cursor.id);
+    assert.ok(result.raw < 100);
+    assert.equal(result.complete, false);
+    cursor = s.items.find((item) => item.parentId === cursor.id && item.title.startsWith('深度'));
+    if (!cursor) break;
+  }
+});
+
+test('Ready to Close uses active domain completion, excludes completed and incomplete leaves, and excludes skipped-only parents', () => {
+  const s = state();
+  const activeComplete = add(s, '可確認'); const child = add(s, '已完成子項', activeComplete.id); setItemStatus(s, child.id, 'completed', { force: true, at });
+  const completedParent = add(s, '已確認'); setItemStatus(s, completedParent.id, 'completed', { force: true, at });
+  const incompleteLeaf = add(s, '尚未完成葉');
+  const skippedParent = add(s, '只有略過子項'); const skipped = add(s, '略過', skippedParent.id); setItemStatus(s, skipped.id, 'skipped', { force: true, at });
+  const ready = smartViewItems(s, 'readyToClose', new Date(at)).map((item) => item.id);
+  assert.ok(ready.includes(activeComplete.id));
+  assert.ok(!ready.includes(completedParent.id));
+  assert.ok(!ready.includes(incompleteLeaf.id));
+  assert.ok(!ready.includes(skippedParent.id));
 });
 
 test('due inheritance, explicit no-deadline, ancestor changes, and planned-start context stay derived', () => {

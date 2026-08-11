@@ -1,6 +1,9 @@
 import { clone, isoNow, normalizeState, SCHEMA_VERSION, validateState } from './schema.js';
 import { saveMigrationSnapshot, saveState } from './db.js';
 
+/** @typedef {import('./types.js').AppState} AppState */
+/** @typedef {import('./types.js').MigrationSnapshot} MigrationSnapshot */
+
 const SNAPSHOT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 export class RecoveryModeError extends Error {
@@ -15,6 +18,7 @@ function errorSummary(error) {
   };
 }
 
+/** @param {AppState} state @param {number} fromVersion @param {number} [toVersion] @param {string} [at] @param {string} [kind] @returns {MigrationSnapshot} */
 export function makeMigrationSnapshot(state, fromVersion, toVersion = SCHEMA_VERSION, at = isoNow(), kind = 'migration') {
   return {
     id: `${kind}_${at.replace(/[^0-9]/g, '')}_${Math.random().toString(36).slice(2, 8)}`,
@@ -55,6 +59,7 @@ function upgradeToVersion2(state) {
   };
 }
 
+/** @param {AppState|Record<string, unknown>} input @param {string} [at] @returns {{state:AppState, snapshot:MigrationSnapshot|null}} */
 export function migrateState(input, at = isoNow()) {
   const source = clone(input);
   const fromVersion = Number(source?.meta?.schemaVersion ?? 0);
@@ -180,6 +185,7 @@ export async function initializeWithMigration(
   return { state, migrated: false, snapshot: null, recovery: true, error: migrationError };
 }
 
+/** @param {AppState} _currentState @param {MigrationSnapshot} snapshot @returns {AppState} */
 export function restoreMigrationSnapshot(_currentState, snapshot) {
   if (!snapshot?.state) throw new RecoveryModeError('Invalid migration snapshot');
   const restored = normalizeState(snapshot.state);

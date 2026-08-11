@@ -2,12 +2,12 @@ import { t, documentShell, formatDate, formatDateTime, relativeDueText } from '.
 import { nextThemePreference, resolveTheme } from './appearance.js';
 import { clone, dateKey, isoNow, makeEmptyState, newId } from './schema.js';
 import {
-  addReminder, addToToday, ancestorsOf, applyDailyRollover, attentionScore, canMove, childrenOf, completionNeedsConfirmation,
+  addReminder, addToToday, attentionScore, canMove, childrenOf, completionNeedsConfirmation,
   createCategory, createItem, dateWarnings, descendantsOf, derivedTodayItems, duplicateSubtree, effectiveDue, effectivePlannedStart,
-  estimateCompletion, getCategory, getItem, importanceMultiplier, isStale, itemPath, lastMeaningfulActivity, markTodayCompletion, createEngineIndex,
-  momentumScore, moveImpact, moveSubtree, pathString, progressForItem, purgeDeleted, recordHistory, removeFromToday, removeReminder, renameCategory,
-  renameItem, reorderCategories, reorderSiblings, reminderCenter, reminderOccurrence, reminderState, routineSuggestion, searchItems,
-  setDue, setImportance, setItemStatus, setNotes, setPriority, setTags, siblingItems, softDeleteCategory, softDeleteItem, snoozeReminder,
+  estimateCompletion, getCategory, getItem, itemPath, markTodayCompletion, createEngineIndex,
+  formatProgress, momentumScore, moveImpact, moveSubtree, pathString, progressResultForItem, recordHistory, removeFromToday, removeReminder, renameCategory,
+  renameItem, reorderCategories, reorderSiblings, reminderCenter, reminderOccurrence, searchItems,
+  setDue, setImportance, setItemStatus, setNotes, setPriority, setTags, softDeleteCategory, softDeleteItem, snoozeReminder,
   smartViewItems, suppressReminderToday, updateReminder, restoreDeleted, reorderSmartView, reminderPatternSuggestion, dueImpactOnRemoval,
 } from './engine.js';
 import { renderMarkdown } from './markdown.js';
@@ -19,7 +19,8 @@ import { browserStorageEstimate, storageBreakdown } from './storage-metrics.js';
 import { exportPTMD, parsePTMD, previewImport, applyImportPreview, restorePreview } from './ptmd.js';
 import { diagnosticReport, dataHealth, recordError, recordPerformance, recordSemantic, capabilityReport, clearDiagnostics } from './diagnostics.js';
 import {
-  canPushState, datasetSwitchGate, GoogleDriveSync, mergeDatasets, prepareDatasetSwitch, resolveConflict,
+  canPushState, conflictArchiveRestorePreview, datasetSwitchGate, GoogleDriveSync, mergeDatasets, prepareDatasetSwitch, resolveConflict,
+  restoreConflictArchive,
 } from './sync.js';
 import { restoreMigrationSnapshot } from './migration.js';
 
@@ -49,8 +50,9 @@ function renderIndex(state) { return renderEngineIndex?.state === state ? render
 function language() { return currentState()?.settings?.language === 'en' ? 'en' : 'zh-TW'; }
 function tr(key, vars) { return t(language(), key, vars); }
 
+/** @param {string} tag @param {Record<string, any>} [attributes] @param {unknown[]} children @returns {any} */
 function node(tag, attributes = {}, ...children) {
-  const element = document.createElement(tag);
+  const element = /** @type {any} */ (document.createElement(tag));
   let deferredValue;
   for (const [key, value] of Object.entries(attributes)) {
     if (value === null || value === undefined || value === false) continue;
@@ -64,7 +66,7 @@ function node(tag, attributes = {}, ...children) {
       }
     }
     else if (key === 'dataset' && typeof value === 'object') Object.assign(element.dataset, value);
-    else if (key.startsWith('on') && typeof value === 'function') element.addEventListener(key.slice(2).toLowerCase(), value);
+    else if (key.startsWith('on') && typeof value === 'function') element.addEventListener(key.slice(2).toLowerCase(), /** @type {EventListener} */ (value));
     else if (key === 'ariaLabel') element.setAttribute('aria-label', value);
     else if (key === 'title') element.title = value;
     else if (key === 'disabled') element.disabled = Boolean(value);
@@ -89,7 +91,6 @@ function iconButton(glyph, label, onClick, options = {}) {
   return button(label, onClick, { ...options, className, icon: glyph, text: false });
 }
 function heading(text, level = 2, className = '') { return node(`h${level}`, { class: className }, text); }
-function setText(element, text) { element.textContent = text; return element; }
 function stop(event) { event.preventDefault(); event.stopPropagation(); }
 
 function scheduleRender() {
@@ -117,7 +118,13 @@ function scheduleCloudSync(delay = 1200) {
 }
 
 function reasonMessage(reason) {
-  const map = { required: 'errorRequired', invalid_category: 'errorNoCategory', invalid_parent: 'errorCycle', cycle: 'errorCycle', max: 'errorMaxReminders', no_due: 'relativeReminderNoDue', recovery: 'errorRecovery', validation: 'errorGeneric', storage: 'errorGeneric', exception: 'errorGeneric', invalid: 'errorGeneric', missing: 'errorGeneric' };
+  const map = {
+    required: 'errorRequired', invalid_category: 'errorNoCategory', invalid_parent: 'errorCycle', cycle: 'errorCycle', max: 'errorMaxReminders', no_due: 'relativeReminderNoDue', recovery: 'errorRecovery',
+    validation: 'errorGeneric', storage: 'errorGeneric', exception: 'errorGeneric', invalid: 'errorGeneric', missing: 'errorGeneric',
+    expired: 'conflictRestoreExpired', missing_target: 'conflictRestoreMissingTarget', missing_parent: 'conflictRestoreMissingParent', missing_parent_snapshot: 'conflictRestoreMissingParent',
+    order_target_changed: 'conflictRestoreOrderChanged', missing_order_snapshot: 'conflictRestoreUnsafe', unsupported_restore_scope: 'conflictRestoreUnsupported', unsafe_field: 'conflictRestoreUnsafe',
+    missing_restore_scope: 'conflictRestoreUnsafe',
+  };
   return tr(map[reason] ?? 'errorGeneric');
 }
 
@@ -140,11 +147,10 @@ function localDateInput(iso) { return iso ? new Date(iso).toISOString().slice(0,
 function dateFromInput(value) { return value ? new Date(`${value}T12:00:00`).toISOString() : null; }
 function priorityColor(priority) { return { none: 'var(--border-subtle)', low: 'var(--priority-low)', medium: 'var(--priority-medium)', high: 'var(--priority-high)' }[priority] ?? 'var(--border-subtle)'; }
 function priorityLabel(priority) { return tr(priority === 'none' ? 'noPriority' : priority); }
-function statusLabel(status) { return tr({ active: 'statusActive', completed: 'statusCompleted', skipped: 'statusSkipped', deleted: 'statusDeleted' }[status] ?? 'unknown'); }
 function fieldLabel(field) { return tr({ title: 'itemTitle', status: 'status', categoryId: 'categoryName', parentId: 'selectParent', activeOrder: 'itemOrderSaved', completedOrder: 'itemOrderSaved', priority: 'priority', importance: 'importance', plannedStart: 'plannedStart', dueMode: 'dueDate', dueDate: 'dueDate', notes: 'notes', tags: 'tags' }[field] ?? 'syncConflict'); }
 function itemHasConflict(state, itemId) { return state.conflicts.some((conflict) => conflict.itemId === itemId); }
 function blockConflictedEdit() { openInfoModal(tr('conflictEditBlocked')); }
-function activityLabel(type) { return tr({ created: 'activityCreated', edited: 'activityEdited', completed: 'activityCompleted', reopened: 'activityReopened', skipped: 'activitySkipped', deleted: 'activityDeleted', restored: 'activityRestored', moved: 'activityMoved', due_changed: 'activityDueChanged', priority_changed: 'activityPriorityChanged', importance_changed: 'activityImportanceChanged', reminder_changed: 'activityReminderChanged', note_edited: 'activityNoteEdited', tag_changed: 'activityTagChanged', today_added: 'todayAdded', today_removed: 'todayRemoved', reordered: 'itemOrderSaved', conflict_resolved: 'activityConflictResolved' }[type] ?? 'activityEdited'); }
+function activityLabel(type) { return tr({ created: 'activityCreated', edited: 'activityEdited', completed: 'activityCompleted', reopened: 'activityReopened', skipped: 'activitySkipped', deleted: 'activityDeleted', restored: 'activityRestored', moved: 'activityMoved', due_changed: 'activityDueChanged', priority_changed: 'activityPriorityChanged', importance_changed: 'activityImportanceChanged', reminder_changed: 'activityReminderChanged', note_edited: 'activityNoteEdited', tag_changed: 'activityTagChanged', today_added: 'todayAdded', today_removed: 'todayRemoved', reordered: 'itemOrderSaved', conflict_resolved: 'activityConflictResolved', conflict_archive_restored: 'activityConflictArchiveRestored' }[type] ?? 'activityEdited'); }
 
 function focusRootForCategory(state, categoryId) { return ui.focusRoot ?? state.settings.focusByCategory?.[categoryId] ?? null; }
 
@@ -158,6 +164,7 @@ function clearFocus(categoryId) {
   mutate('focus_cleared', (state) => { delete state.settings.focusByCategory[categoryId]; return { ok: true }; }, null, { queue: false });
 }
 
+/** @param {Element} element @param {(event: PointerEvent) => void} callback @param {{duration?: number, onStart?: (element: Element) => void, onCancel?: (element: Element) => void}} [options] */
 function bindLongPress(element, callback, { duration = 650, onStart, onCancel } = {}) {
   let timer = null; let startX = 0; let startY = 0; let triggered = false;
   const start = (event) => {
@@ -202,7 +209,7 @@ function bindPointerReorder(handle, row, item, smartView = null) {
       return;
     }
     event.preventDefault();
-    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest?.('.item-row');
+    const target = /** @type {HTMLElement|null} */ (document.elementFromPoint(event.clientX, event.clientY)?.closest?.('.item-row'));
     clearTargets();
     if (!target || target === row) return;
     const targetItem = getItem(currentState(), target.dataset.itemId);
@@ -248,13 +255,13 @@ function bindPointerCategoryReorder(handle, row, category) {
       return;
     }
     event.preventDefault();
-    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest?.('.category-nav-row');
+    const target = /** @type {HTMLElement|null} */ (document.elementFromPoint(event.clientX, event.clientY)?.closest?.('.category-nav-row'));
     document.querySelectorAll('.category-nav-row.category-drag-target').forEach((candidate) => candidate.classList.remove('category-drag-target'));
     if (target && target !== row) target.classList.add('category-drag-target');
   });
   handle.addEventListener('pointerup', (event) => {
     if (!active) { clearTimeout(timer); timer = null; return; }
-    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest?.('.category-nav-row');
+    const target = /** @type {HTMLElement|null} */ (document.elementFromPoint(event.clientX, event.clientY)?.closest?.('.category-nav-row'));
     const targetId = target?.dataset?.categoryId;
     cleanup();
     if (!targetId || targetId === category.id) return;
@@ -274,8 +281,8 @@ function handleKeyboardShortcuts(event) {
   const editing = target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName);
   if (editing) return;
   if (event.key === '?' || (event.key === '/' && event.shiftKey)) { event.preventDefault(); openInfoModal(tr('keyboardShortcuts')); }
-  else if (event.key === '/') { event.preventDefault(); document.querySelector('.global-search')?.focus(); }
-  else if (event.key.toLowerCase() === 'n' && ui.page === 'categories') { event.preventDefault(); document.querySelector('.quick-create-input')?.focus(); }
+  else if (event.key === '/') { event.preventDefault(); (/** @type {HTMLInputElement|null} */ (document.querySelector('.global-search')))?.focus(); }
+  else if (event.key.toLowerCase() === 'n' && ui.page === 'categories') { event.preventDefault(); (/** @type {HTMLInputElement|null} */ (document.querySelector('.quick-create-input')))?.focus(); }
 }
 function swipeHandler(element, item) {
   let startX = 0; let startY = 0; let active = false;
@@ -355,7 +362,6 @@ function openDetail(itemId) {
 }
 
 function focusItem(item) {
-  const state = currentState();
   ui.page = 'categories'; ui.categoryId = item.categoryId; ui.focusRoot = item.id; ui.search = ''; ui.highlightId = item.id;
   mutate('search_focus', (draft) => {
     const expanded = new Set(draft.settings.expandedByCategory[item.categoryId] ?? []);
@@ -377,14 +383,14 @@ function render() {
   const shell = documentShell(language());
   document.documentElement.lang = shell.lang;
   document.title = shell.title;
-  const descriptionMeta = document.querySelector('meta[name="description"]');
+  const descriptionMeta = /** @type {HTMLMetaElement|null} */ (document.querySelector('meta[name="description"]'));
   if (descriptionMeta) descriptionMeta.content = shell.description;
   const manifestLink = document.querySelector('link[rel="manifest"]');
   if (manifestLink && manifestLink.getAttribute('href') !== shell.manifest) manifestLink.setAttribute('href', shell.manifest);
   const visualTheme = resolveTheme(state.settings.theme, Boolean(globalThis.matchMedia?.('(prefers-color-scheme: dark)').matches));
   document.documentElement.dataset.theme = visualTheme;
-  const themeMeta = document.querySelector('meta[name="theme-color"]'); if (themeMeta) themeMeta.content = visualTheme === 'dark' ? '#0b0b0f' : '#f2f2f7';
-  const appleTitle = document.querySelector('meta[name="apple-mobile-web-app-title"]'); if (appleTitle) appleTitle.content = shell.title;
+  const themeMeta = /** @type {HTMLMetaElement|null} */ (document.querySelector('meta[name="theme-color"]')); if (themeMeta) themeMeta.content = visualTheme === 'dark' ? '#0b0b0f' : '#f2f2f7';
+  const appleTitle = /** @type {HTMLMetaElement|null} */ (document.querySelector('meta[name="apple-mobile-web-app-title"]')); if (appleTitle) appleTitle.content = shell.title;
   activeVirtualList?.destroy();
   activeVirtualList = null;
   root.replaceChildren(renderShell(state));
@@ -480,7 +486,7 @@ function renderCategoryPage(state) {
   if (!category) return renderEmptyState('errorNoCategory', 'addCategory', openCategoryCreate);
   ui.categoryId = category.id;
   const page = node('section', { class: 'page category-page' });
-  const header = node('div', { class: 'page-header' }, node('div', { class: 'page-header-main' }, renderCategoryBreadcrumb(state, category), heading(category.title, 1), node('p', { class: 'page-subtitle' }, `${index.itemsByCategory.get(category.id)?.length ?? 0} · ${tr('swipeComplete')} · ${tr('swipeDelete')}`)), node('div', { class: 'page-header-actions' }, button(tr('addItem'), () => { ui.quickActionId = null; document.querySelector('.quick-create-input')?.focus(); }, { className: 'primary-button', icon: '+' }), iconButton('⌘', tr('keyboardShortcuts'), () => openInfoModal(tr('keyboardShortcuts')))));
+  const header = node('div', { class: 'page-header' }, node('div', { class: 'page-header-main' }, renderCategoryBreadcrumb(state, category), heading(category.title, 1), node('p', { class: 'page-subtitle' }, `${index.itemsByCategory.get(category.id)?.length ?? 0} · ${tr('swipeComplete')} · ${tr('swipeDelete')}`)), node('div', { class: 'page-header-actions' }, button(tr('addItem'), () => { ui.quickActionId = null; (/** @type {HTMLInputElement|null} */ (document.querySelector('.quick-create-input')))?.focus(); }, { className: 'primary-button', icon: '+' }), iconButton('⌘', tr('keyboardShortcuts'), () => openInfoModal(tr('keyboardShortcuts')))));
   page.append(header);
   if (ui.search.trim()) page.append(renderSearchResults(state));
   else page.append(renderQuickCreate(state, category), renderTreeList(state, category));
@@ -524,7 +530,7 @@ function renderQuickCreate(state, category) {
 }
 
 async function createFromQuickInput(state, categoryId, parentId = null) {
-  const input = document.querySelector('.quick-create-input');
+  const input = /** @type {HTMLInputElement|null} */ (document.querySelector('.quick-create-input'));
   const title = input?.value?.trim();
   if (!title) { input?.focus(); toast(tr('errorRequired'), 'error'); return; }
   const result = await mutate(parentId ? 'add_child' : 'create_item', (draft) => createItem(draft, { categoryId, parentId, title }), null);
@@ -538,6 +544,7 @@ function flattenTree(state, categoryId, focusId = null) {
   const roots = focus ? [focus] : sortTreeForDisplay(state, categoryItems.filter((item) => item.parentId === null && item.status !== 'completed'), index);
   const expanded = state.settings.expandedByCategory?.[categoryId] ?? [];
   const expandedSet = new Set([...expanded, ...(focus ? [focus.id] : [])]);
+  /** @type {Array<any>} */
   const result = [];
   const visit = (item, depth, siblingIndex = 0, siblingCount = 1) => {
     result.push({ kind: 'item', item, depth, siblingIndex, siblingCount });
@@ -577,7 +584,7 @@ function sortTreeForDisplay(state, items, index = renderIndex(state)) {
       const priority = { high: 3, medium: 2, low: 1, none: 0 };
       return (priority[b.priority] - priority[a.priority]) || (attentionScore(state, b.id, renderNow, index) - attentionScore(state, a.id, renderNow, index)) || (a.activeOrder - b.activeOrder);
     }
-    return (a.status === 'skipped') - (b.status === 'skipped') || a.activeOrder - b.activeOrder;
+    return Number(a.status === 'skipped') - Number(b.status === 'skipped') || Number(a.activeOrder) - Number(b.activeOrder);
   });
 }
 
@@ -609,7 +616,7 @@ function renderTreeList(state, category) {
         siblingCount: entry.siblingCount,
         tree: true,
       }),
-    empty: () => renderEmptyState('noItems', 'addItem', () => document.querySelector('.quick-create-input')?.focus()),
+    empty: () => renderEmptyState('noItems', 'addItem', () => (/** @type {HTMLInputElement|null} */ (document.querySelector('.quick-create-input')))?.focus()),
   });
   activeVirtualList.setItems(rows);
   return holder;
@@ -636,7 +643,8 @@ function renderItemRow(state, item, { depth = 0, sourceDepth = depth, maxDepth =
   const isParent = childItems.length > 0;
   const semantics = treeRowSemantics({ childCount: childItems.length, depth, sourceDepth, maxDepth, tree, pathContext, smartView, siblingIndex, siblingCount, nextDepth });
   const showRing = semantics.hasProgressRing;
-  const progress = progressForItem(state, item.id, index.progressByItem, new Set(), index);
+  const progressResult = progressResultForItem(state, item.id, index.progressResultByItem, new Set(), index);
+  const progress = formatProgress(progressResult.raw, progressResult.complete);
   const due = effectiveDue(state, item.id, index);
   const dueText = due.value ? relativeDueText(language(), due.value) : tr('noDeadline');
   const dueDate = due.value ? new Date(due.value) : null;
@@ -644,7 +652,6 @@ function renderItemRow(state, item, { depth = 0, sourceDepth = depth, maxDepth =
   const isToday = dueDate && dateKey(dueDate) === dateKey(renderNow);
   const conflict = index.conflictsByItem.has(item.id);
   const reminders = index.remindersByItem.get(item.id) ?? [];
-  const expanded = state.settings.expandedByCategory?.[item.categoryId]?.includes(item.id);
   const row = node('article', {
     class: `item-row priority-${item.priority} ${treeRowClassNames(semantics)} ${item.status === 'completed' ? 'is-completed' : ''} ${ui.quickActionId === item.id ? 'quick-open' : ''} ${ui.highlightId === item.id ? 'item-highlight' : ''}`,
     style: { '--priority-color': priorityColor(item.priority), '--depth': String(semantics.depth) },
@@ -929,7 +936,8 @@ function selectOptions(values, selected, labels = {}) { return values.map((value
 function renderDetailPanel(state, item) {
   const index = renderIndex(state);
   const due = effectiveDue(state, item.id, index);
-  const progress = progressForItem(state, item.id, index.progressByItem, new Set(), index);
+  const progressResult = progressResultForItem(state, item.id, index.progressResultByItem, new Set(), index);
+  const progress = formatProgress(progressResult.raw, progressResult.complete);
   const lockedByConflict = itemHasConflict(state, item.id);
   const panel = node('aside', { class: 'detail-pane', role: 'dialog', 'aria-label': tr('detail') });
   const header = node('div', { class: 'detail-header' }, node('div', { class: 'detail-heading' }, node('span', { class: 'eyebrow' }, tr('detail')), heading(item.title, 2)), iconButton('×', tr('closePanel'), () => { ui.detailId = null; scheduleRender(); }));
@@ -1090,7 +1098,7 @@ function renderNotesField(state, item) {
 }
 
 function renderChildrenField(state, item) {
-  const children = [...childrenOf(state, item.id, renderIndex(state))].sort((a, b) => (a.status === 'completed') - (b.status === 'completed') || a.activeOrder - b.activeOrder);
+  const children = [...childrenOf(state, item.id, renderIndex(state))].sort((a, b) => Number(a.status === 'completed') - Number(b.status === 'completed') || Number(a.activeOrder) - Number(b.activeOrder));
   const section = node('section', { class: 'detail-section children-section' }, node('div', { class: 'section-toolbar' }, heading(tr('children'), 3), button(tr('addChild'), () => openChildCreate(item), { className: 'text-button', icon: '+' })));
   if (!children.length) section.append(node('p', { class: 'muted' }, tr('noItems')));
   else children.forEach((child, childIndex) => section.append(renderItemRow(state, child, {
@@ -1260,7 +1268,7 @@ function renderDataSettings(state) {
   const lastBackup = state.backupMeta.filter((backup) => backup.scope === 'full').sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
   const section = node('div', { class: 'settings-stack' });
   section.append(settingCard(tr('dataOverview'), metricGrid([[tr('itemCount'), stats.items], [tr('completedCount'), stats.completed], [tr('deletedCount'), stats.deleted], [tr('historyCount'), stats.history], [tr('lastBackup'), lastBackup ? formatDateTime(language(), lastBackup.createdAt) : tr('notBackedUp')]])));
-  section.append(renderExportCard(state), renderImportCard(), renderFullRestoreCard(), renderCloudCard(state), renderActiveConflicts(state), renderRecycleBin(state), renderRecoveryCard(state), renderDangerousDataCard());
+  section.append(renderExportCard(state), renderImportCard(), renderFullRestoreCard(), renderCloudCard(state), renderConflictArchive(state), renderActiveConflicts(state), renderRecycleBin(state), renderRecoveryCard(state), renderDangerousDataCard());
   const labels = {
     metadata: 'usageMetadata', categories: 'usageCategories', items: 'usageItems', notes: 'usageNotes', tags: 'usageTags', history: 'usageHistory', reminders: 'usageReminders',
     today: 'usageToday', deleted: 'usageDeleted', sync: 'usageSync', conflicts: 'usageConflicts', backup: 'usageBackup',
@@ -1333,6 +1341,61 @@ function renderActiveConflicts(state) {
     list.append(renderConflictComparison(conflict));
   }
   return settingCard(tr('activeConflicts'), node('p', { class: 'warning-note' }, tr('conflictBlocked', { count: state.conflicts.length })), node('p', { class: 'field-hint' }, tr('conflictChoiceRequired')), list);
+}
+
+function archiveEntityContextLabel(state, archive) {
+  if (archive.entityType === 'item') {
+    const item = state.items.find((candidate) => candidate.id === archive.entityId);
+    if (item) return item.title;
+    const deleted = state.deleted.find((entry) => entry.snapshot?.items?.some((candidate) => candidate.id === archive.entityId));
+    return deleted?.snapshot?.items?.find((candidate) => candidate.id === archive.entityId)?.title ?? tr('entityItem');
+  }
+  if (archive.entityType === 'category') return state.categories.find((category) => category.id === archive.entityId)?.title ?? tr('entityCategory');
+  return tr({ reminder: 'entityReminder', today: 'entityToday', sibling_order: 'entityOrder', smart_order: 'entityOrder', settings: 'entitySettings' }[archive.entityType] ?? 'syncConflict');
+}
+
+function archiveChangeValue(state, change) {
+  if (change.field === 'categoryId') return state.categories.find((category) => category.id === change.restoredValue)?.title ?? tr('categoryRoot');
+  if (change.field === 'parentId') return change.restoredValue ? state.items.find((item) => item.id === change.restoredValue)?.title ?? tr('entityItem') : tr('categoryRoot');
+  return conflictValue(change.restoredValue);
+}
+
+function openConflictArchiveRestore(archive) {
+  const preview = conflictArchiveRestorePreview(currentState(), archive.id, isoNow());
+  if (!preview.ok) { toast(reasonMessage(preview.reason), 'error'); return; }
+  if (!preview.changed) { toast(tr('conflictRestoreNoChange'), 'error'); return; }
+  ui.modal = { kind: 'conflictArchiveRestore', title: tr('restoreRejectedVersion'), archiveId: archive.id, archive, preview };
+  scheduleRender();
+}
+
+function renderConflictArchive(state) {
+  const entries = (state.conflictArchive ?? [])
+    .filter((archive) => !archive.purgeAfter || new Date(archive.purgeAfter).getTime() > Date.now())
+    .sort((a, b) => String(b.resolvedAt).localeCompare(String(a.resolvedAt)));
+  if (!entries.length) return settingCard(tr('resolvedConflictArchive'), node('p', { class: 'muted' }, tr('noResolvedConflictArchive')));
+  const list = node('div', { class: 'conflict-list archive-list' });
+  for (const archive of entries) {
+    const preview = conflictArchiveRestorePreview(state, archive.id, isoNow());
+    const restorable = preview.ok && preview.changed;
+    const status = restorable ? tr('restoreAvailable') : tr('restoreUnavailable');
+    const statusClass = restorable ? 'archive-status available' : 'archive-status unavailable';
+    const result = archive.chosenState === 'local' ? tr('chooseLocal') : tr('chooseCloud');
+    const card = node('article', { class: 'conflict-card archive-card' },
+      node('div', { class: 'conflict-card-header' },
+        node('div', {}, node('strong', {}, archiveEntityContextLabel(state, archive)), node('small', {}, `${conflictTypeLabel(archive.type)} · ${tr('rejectedVersion')}`)),
+        node('span', { class: statusClass }, status),
+      ),
+      node('div', { class: 'archive-meta' },
+        node('span', {}, `${tr('restoreSelectedSide')}: ${result}`),
+        node('span', {}, `${tr('restoreResolvedAt')}: ${formatDateTime(language(), archive.resolvedAt)}`),
+        node('span', {}, `${tr('restoreExpiry')}: ${formatDateTime(language(), archive.purgeAfter)}`),
+      ),
+      node('p', { class: 'field-hint' }, preview.ok ? tr('restoreLaterChangesPreserved') : reasonMessage(preview.reason)),
+      node('div', { class: 'conflict-actions' }, button(tr('restoreNow'), () => openConflictArchiveRestore(archive), { className: 'secondary-button', disabled: !restorable })),
+    );
+    list.append(card);
+  }
+  return settingCard(tr('resolvedConflictArchive'), node('p', { class: 'field-hint' }, tr('conflictArchive')), list);
 }
 
 function formatBytes(bytes) { if (!bytes) return '0 B'; if (bytes < 1024) return `${bytes} B`; if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`; return `${(bytes / 1048576).toFixed(2)} MB`; }
@@ -1543,11 +1606,6 @@ async function adoptEmptyCloudDataset() {
   ui.modal = null;
 }
 
-async function switchToEmptyDataset() {
-  const empty = makeEmptyState();
-  await switchToRemoteDataset(empty, null);
-}
-
 async function loadDatasetChoice(choice) {
   try {
     const remote = await driveSync.pull(null, null);
@@ -1598,7 +1656,7 @@ async function switchToRemoteDataset(remote, remoteFile = null, riskAccepted = f
 
 async function pushCloud(state) {
   const gate = canPushState(state);
-  if (!gate.ok) { toast(tr('syncPushBlocked'), 'error'); return { ok: false, reason: gate.reason }; }
+  if (gate.ok !== true) { toast(tr('syncPushBlocked'), 'error'); return { ok: false, reason: gate.reason }; }
   try {
     const pushed = await driveSync.push(state, state.settings.cloudSync?.fileId ?? null);
     await mutate('sync_push', (draft) => {
@@ -1814,12 +1872,6 @@ function renderIconGuide() {
   return settingCard(tr('iconGuideTitle'), ...entries.map(([glyph, key]) => node('div', { class: 'icon-guide-row' }, node('span', { class: 'icon-guide-symbol' }, glyph), node('span', {}, tr(key)))));
 }
 
-function renderDeveloperSettingsLegacy(state) {
-  const report = diagnosticReport(state);
-  const health = dataHealth(state);
-  return node('div', { class: 'settings-stack' }, settingCard(tr('settingsDeveloper'), node('p', { class: 'field-hint' }, tr('developerInfo')), settingsToggle(tr('developerEnabled'), state.settings.developerEnabled === true, (event) => updateSetting('developer_enabled_changed', (settings) => { settings.developerEnabled = event.target.checked; }, 'savedOffline')), node('div', { class: 'button-grid' }, button(tr('exportDiagnostics'), () => { downloadText(`progress-tracker-diagnostics-${dateKey(new Date())}.json`, JSON.stringify(diagnosticReport(currentState()), null, 2), 'application/json'); mutate('diagnostic_export', (draft) => { recordSemantic(draft, 'export', { scope: 'diagnostics' }); return { ok: true }; }, null, { queue: false }); }, { className: 'secondary-button' }), button(tr('clearDiagnostics'), () => mutate('clear_diagnostics', (draft) => { clearDiagnostics(draft); return { ok: true }; }, 'savedOffline', { queue: false }), { className: 'danger-button' }))), settingCard(tr('developerDiagnostics'), metricGrid([[tr('historyCount'), report.semanticEventMetadata.eventCount], [tr('developerDiagnostics'), report.errors.length], [tr('performance'), report.performance.length]]), node('p', { class: 'field-hint' }, tr('diagnosticsNoContent'))), settingCard(tr('developerHealth'), node('div', { class: health.ok ? 'health-ok' : 'health-error' }, health.ok ? '✓' : `${health.errors.length}`, health.ok ? tr('savedOffline') : tr('errorGeneric')), node('pre', { class: 'diagnostic-pre' }, JSON.stringify(health, null, 2))));
-}
-
 function localizedHealthLabel(type) {
   return tr({
     duplicate_category_id: 'healthDuplicate',
@@ -1852,6 +1904,17 @@ function renderDeveloperSettings(state) {
       button(tr('clearDiagnostics'), () => mutate('clear_diagnostics', (draft) => { clearDiagnostics(draft); return { ok: true }; }, 'savedOffline', { queue: false }), { className: 'danger-button' }),
     ),
   );
+  const errorEntries = report.errors.length
+    ? node('div', { class: 'diagnostic-errors' }, ...report.errors.slice().reverse().slice(0, 20).map((entry) => node('article', { class: 'diagnostic-error' },
+      node('div', { class: 'diagnostic-error-header' }, node('strong', {}, entry.name), node('span', { class: 'metric-badge' }, entry.classification === 'technical' ? tr('diagnosticSource') : tr('diagnosticRedacted'))),
+      node('div', { class: 'diagnostic-error-grid' },
+        node('span', {}, `${tr('diagnosticErrorType')}: ${entry.name}`),
+        node('span', {}, `${tr('diagnosticSource')}: ${entry.source}`),
+        node('span', {}, `${tr('diagnosticTime')}: ${entry.at ? formatDateTime(language(), entry.at) : tr('notAvailable')}`),
+        node('span', {}, entry.classification === 'technical' && entry.message ? entry.message : tr('diagnosticMessageRedacted')),
+      ),
+    )))
+    : node('p', { class: 'field-hint' }, tr('diagnosticNoErrors'));
   const diagnostics = settingCard(
     tr('developerDiagnostics'),
     metricGrid([
@@ -1860,6 +1923,7 @@ function renderDeveloperSettings(state) {
       [tr('performance'), report.performance.length],
     ]),
     node('p', { class: 'field-hint' }, tr('diagnosticsNoContent')),
+    errorEntries,
   );
   const issues = health.ok
     ? node('p', { class: 'field-hint' }, tr('healthNoIssues'))
@@ -1934,6 +1998,7 @@ function renderModal(state) {
   else if (modal.kind === 'duplicate') renderDuplicateModal(content, state, getItem(state, modal.itemId));
   else if (modal.kind === 'import') renderImportModal(content, modal.preview);
   else if (modal.kind === 'restore') renderRestoreModal(content, modal.preview);
+  else if (modal.kind === 'conflictArchiveRestore') renderConflictArchiveRestoreModal(content, modal);
   else if (modal.kind === 'snapshotRestore') renderSnapshotRestoreModal(content, modal);
   else if (modal.kind === 'sync') renderSyncModal(content, modal);
   else if (modal.kind === 'dataset') renderDatasetModal(content, modal);
@@ -2020,6 +2085,25 @@ async function confirmImport(preview) {
 
 function renderRestoreModal(content, preview) {
   content.append(node('p', {}, tr('restoreSafety')), metricGrid([[tr('itemCount'), preview.summary.incomingItems], [tr('completedCount'), preview.summary.added], [tr('deletedCount'), preview.summary.deleted], [tr('categoryName'), preview.summary.categories]]), node('div', { class: 'modal-actions' }, button(tr('cancel'), () => { ui.modal = null; ui.restorePreview = null; scheduleRender(); }, { className: 'text-button' }), button(tr('restoreFull'), () => openConfirm({ title: tr('restoreFull'), message: tr('restoreConfirm', { value: language() === 'en' ? 'CONFIRM' : '確認' }), danger: true, typed: true, onConfirm: () => confirmFullRestore(preview) }), { className: 'danger-button' })));
+}
+
+function renderConflictArchiveRestoreModal(content, modal) {
+  const preview = modal.preview;
+  if (!preview?.ok) { content.append(node('p', { class: 'warning-note' }, reasonMessage(preview?.reason))); return; }
+  const state = currentState();
+  const changes = node('div', { class: 'archive-restore-changes' }, ...preview.changes.map((change) => {
+    const label = change.field ? fieldLabel(change.field) : conflictTypeLabel(modal.archive?.type);
+    const current = archiveChangeValue(state, { ...change, restoredValue: change.currentValue });
+    const restored = archiveChangeValue(state, change);
+    return node('div', { class: 'archive-restore-change' }, node('strong', {}, label), node('span', {}, `${tr('restoreCurrentValue')}: ${current}`), node('span', {}, `${tr('restoreArchivedValue')}: ${restored}`));
+  }));
+  content.append(node('p', {}, tr('restoreLaterChangesPreserved')), changes, node('div', { class: 'modal-actions' },
+    button(tr('cancel'), () => { ui.modal = null; scheduleRender(); }, { className: 'text-button' }),
+    button(tr('restoreNow'), async () => {
+      const result = await mutate('conflict_archive_restored', (draft) => restoreConflictArchive(draft, modal.archiveId, isoNow()), 'conflictRestoreSuccess');
+      if (result.ok) { ui.modal = null; scheduleRender(); }
+    }, { className: 'primary-button' }),
+  ));
 }
 
 async function confirmFullRestore(preview) {

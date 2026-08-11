@@ -1,6 +1,10 @@
 import { clone, dateKey, DAY_MS, isoNow, makeCategory, makeItem, newId } from './schema.js';
 import { createEngineIndex } from './engine-index.js';
 
+/** @typedef {import('./types.js').AppState} AppState */
+/** @typedef {import('./types.js').Item} Item */
+/** @typedef {{raw:number, complete:boolean}} ProgressResult */
+
 export { createEngineIndex } from './engine-index.js';
 
 const IMPORTANCE_MULTIPLIER = { 0: 1, 1: 1.5, 2: 2, 3: 3 };
@@ -156,6 +160,7 @@ export function reorderCategories(state, categoryId, beforeCategoryId, at = isoN
   return { ok: true };
 }
 
+/** @param {AppState} state @param {{categoryId:string, parentId?:string|null, title:string}} input @param {string} [at] */
 export function createItem(state, { categoryId, parentId = null, title }, at = isoNow()) {
   const cleanTitle = String(title ?? '').trim();
   if (!cleanTitle) return { ok: false, reason: 'required' };
@@ -164,7 +169,7 @@ export function createItem(state, { categoryId, parentId = null, title }, at = i
     const parent = getItem(state, parentId);
     if (!parent || parent.categoryId !== categoryId) return { ok: false, reason: 'invalid_parent' };
   }
-  const item = makeItem({ categoryId, parentId, title: cleanTitle, order: nextOrder(state, categoryId, parentId, 'active'), now: at });
+  const item = /** @type {Item} */ (makeItem({ categoryId, parentId, title: cleanTitle, order: nextOrder(state, categoryId, parentId, 'active'), now: at }));
   state.items.push(item);
   recordHistory(state, item.id, 'created', {}, at);
   touchItem(state, item, ['title', 'parentId', 'categoryId'], at);
@@ -198,6 +203,7 @@ export function reorderSiblings(state, itemId, beforeItemId, at = isoNow()) {
   return { ok: true };
 }
 
+/** @param {AppState} state @param {string} itemId @param {{categoryId:string, parentId?:string|null}} target @param {string} [at] */
 export function moveSubtree(state, itemId, { categoryId, parentId = null }, at = isoNow()) {
   const check = canMove(state, itemId, { categoryId, parentId });
   if (!check.ok) return check;
@@ -212,27 +218,54 @@ export function moveSubtree(state, itemId, { categoryId, parentId = null }, at =
   return { ok: true, item, subtreeCount: subtree.length, previous };
 }
 
-export function progressForItem(state, itemId, memo = null, trail = new Set(), index = null) {
+/** @param {AppState} state @param {string} itemId @param {Map<string, ProgressResult>|null} [memo] @param {Set<string>} [trail] @param {ReturnType<typeof createEngineIndex>|null} [index] @returns {ProgressResult} */
+export function progressResultForItem(state, itemId, memo = null, trail = new Set(), index = null) {
   const context = index ?? createEngineIndex(state);
-  const progressMemo = memo ?? context.progressByItem;
+  const progressMemo = memo ?? context.progressResultByItem;
   if (progressMemo.has(itemId)) return progressMemo.get(itemId);
-  if (trail.has(itemId)) return 0;
+  if (trail.has(itemId)) return { raw: 0, complete: false };
   const item = getItem(state, itemId, context);
-  if (!item) return 0;
+  if (!item) return { raw: 0, complete: false };
   const children = childrenOf(state, itemId, context);
   if (!children.length) {
-    const value = item.status === 'completed' ? 100 : 0;
-    progressMemo.set(itemId, value); return value;
+    const result = { raw: item.status === 'completed' ? 100 : 0, complete: item.status === 'completed' };
+    progressMemo.set(itemId, result); return result;
   }
-  if (item.status === 'skipped') { progressMemo.set(itemId, 0); return 0; }
+  if (item.status === 'skipped') {
+    const result = { raw: 0, complete: false };
+    progressMemo.set(itemId, result); return result;
+  }
   const nextTrail = new Set(trail).add(itemId);
   const valid = children.filter((child) => child.status !== 'skipped');
-  if (!valid.length) { progressMemo.set(itemId, 0); return 0; }
+  if (!valid.length) {
+    const result = { raw: 0, complete: false };
+    progressMemo.set(itemId, result); return result;
+  }
   const totalWeight = valid.reduce((sum, child) => sum + (IMPORTANCE_MULTIPLIER[child.importance] ?? 1), 0);
-  const weighted = valid.reduce((sum, child) => sum + progressForItem(state, child.id, progressMemo, nextTrail, context) * (IMPORTANCE_MULTIPLIER[child.importance] ?? 1), 0);
-  const value = Math.round((weighted / totalWeight) * 10) / 10;
-  progressMemo.set(itemId, value);
-  return value;
+  const childResults = valid.map((child) => progressResultForItem(state, child.id, progressMemo, nextTrail, context));
+  const weighted = childResults.reduce((sum, child, index) => sum + child.raw * (IMPORTANCE_MULTIPLIER[valid[index].importance] ?? 1), 0);
+  const result = {
+    raw: childResults.every((child) => child.complete) ? 100 : weighted / totalWeight,
+    complete: childResults.every((child) => child.complete),
+  };
+  progressMemo.set(itemId, result);
+  return result;
+}
+
+/** @param {AppState} state @param {string} itemId @param {Map<string, number>|null} [memo] @param {Set<string>} [trail] @param {ReturnType<typeof createEngineIndex>|null} [index] @returns {number} */
+export function progressForItem(state, itemId, memo = null, trail = new Set(), index = null) {
+  const context = index ?? createEngineIndex(state);
+  const numericMemo = memo ?? context.progressByItem;
+  if (numericMemo.has(itemId)) return numericMemo.get(itemId);
+  const result = progressResultForItem(state, itemId, context.progressResultByItem, trail, context);
+  numericMemo.set(itemId, result.raw);
+  return result.raw;
+}
+
+export function formatProgress(value, complete = false) {
+  if (complete) return 100;
+  const numeric = Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
+  return Math.min(99.9, Math.round(numeric * 10) / 10);
 }
 
 export function importanceMultiplier(importance) {
@@ -270,7 +303,7 @@ export function setItemStatus(state, itemId, status, { force = false, at = isoNo
     item.completedAt = null;
     for (const reminder of state.reminders.filter((candidate) => candidate.itemId === itemId)) {
       if (reminder.suspendedByCompletion) {
-        const occurrence = reminderOccurrence(state, reminder, at);
+        const occurrence = reminderOccurrence(state, reminder, new Date(at));
         reminder.suspendedByCompletion = false;
         remindersChanged = true;
         if (occurrence && occurrence.getTime() > new Date(at).getTime()) reminder.enabled = true;
@@ -285,7 +318,6 @@ export function setItemStatus(state, itemId, status, { force = false, at = isoNo
     recordHistory(state, itemId, 'edited', { fields: ['status'] }, at);
   }
   const siblings = state.items.filter((candidate) => candidate.id !== item.id && candidate.categoryId === item.categoryId && candidate.parentId === item.parentId && candidate.status === status);
-  const previousOrderField = previous === 'completed' ? 'completedOrder' : 'activeOrder';
   const currentOrderField = status === 'completed' ? 'completedOrder' : 'activeOrder';
   const maxCurrentOrder = siblings.reduce((max, candidate) => Math.max(max, Number(candidate[currentOrderField] ?? -1)), -1);
   item[currentOrderField] = status === 'active' && previous === 'completed' && item.reopenOrder !== null ? Math.min(Number(item.reopenOrder), maxCurrentOrder + 1) : maxCurrentOrder + 1;
@@ -296,6 +328,7 @@ export function setItemStatus(state, itemId, status, { force = false, at = isoNo
   return { ok: true, item, changed: true, previous };
 }
 
+/** @param {AppState} state @param {string} itemId @param {ReturnType<typeof createEngineIndex>|null} [index] @returns {{value:string|null, source:string, sourceItemId:string|null}} */
 export function effectiveDue(state, itemId, index = null) {
   const context = index ?? createEngineIndex(state);
   if (context.dueByItem.has(itemId)) return context.dueByItem.get(itemId);
@@ -515,6 +548,7 @@ export function removeReminder(state, reminderId, at = isoNow()) {
   return { ok: true };
 }
 
+/** @param {AppState} state @param {import('./types.js').Reminder} reminder @param {Date} [reference] @param {ReturnType<typeof createEngineIndex>|null} [index] @returns {Date|null} */
 export function reminderOccurrence(state, reminder, reference = new Date(), index = null) {
   if (!reminder) return null;
   let base;
@@ -733,6 +767,7 @@ function dueDifference(state, itemId, now, index = null) {
   return due ? new Date(due).getTime() - now.getTime() : null;
 }
 
+/** @param {AppState} state @param {string} view @param {Date} [now] @param {ReturnType<typeof createEngineIndex>|null} [index] @returns {Item[]} */
 export function smartViewItems(state, view, now = new Date(), index = null) {
   const context = index ?? createEngineIndex(state);
   const active = state.items.filter((item) => item.status !== 'skipped');
@@ -763,7 +798,7 @@ export function smartViewItems(state, view, now = new Date(), index = null) {
     case 'upcoming': result = [...current.filter((item) => dueMatches(item, (diff) => diff >= 0 && diff <= 14 * DAY_MS)), ...completed.filter((item) => dueMatches(item, (diff) => diff >= 0 && diff <= 14 * DAY_MS))]; break;
     case 'overdue': result = [...current.filter((item) => dueMatches(item, (diff) => diff < 0)), ...completed.filter((item) => dueMatches(item, (diff) => diff < 0))]; break;
     case 'recentlyCompleted': result = completed.filter((item) => item.completedAt && new Date(item.completedAt).getTime() >= recentCutoff); break;
-    case 'readyToClose': result = [...current.filter((item) => progressForItem(state, item.id, context.progressByItem, new Set(), context) >= 100), ...completed.filter((item) => progressForItem(state, item.id, context.progressByItem, new Set(), context) >= 100)]; break;
+    case 'readyToClose': result = current.filter((item) => progressResultForItem(state, item.id, context.progressResultByItem, new Set(), context).complete); break;
     case 'recentlyActive': result = [...current.filter((item) => new Date(latestActivity(item)).getTime() >= recentCutoff), ...completed.filter((item) => new Date(latestActivity(item)).getTime() >= recentCutoff)]; break;
     case 'highAttention': result = [...current.filter((item) => (attentionByItem.get(item.id) ?? 0) >= 3), ...completed.filter((item) => (attentionByItem.get(item.id) ?? 0) >= 3)]; break;
     case 'stale': result = current.filter((item) => isStale(state, item.id, now, context)); break;
@@ -774,7 +809,7 @@ export function smartViewItems(state, view, now = new Date(), index = null) {
   }
   const customOrder = state.smartOrders?.[view] ?? [];
   const customOrderIndex = new Map(customOrder.map((id, position) => [id, position]));
-  return result.sort((a, b) => (a.status === 'completed') - (b.status === 'completed') || (customOrderIndex.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (customOrderIndex.get(b.id) ?? Number.MAX_SAFE_INTEGER) || (a.activeOrder ?? 0) - (b.activeOrder ?? 0));
+  return result.sort((a, b) => Number(a.status === 'completed') - Number(b.status === 'completed') || (customOrderIndex.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (customOrderIndex.get(b.id) ?? Number.MAX_SAFE_INTEGER) || Number(a.activeOrder ?? 0) - Number(b.activeOrder ?? 0));
 }
 
 export function reorderSmartView(state, view, itemId, beforeItemId = null, at = isoNow()) {
@@ -851,12 +886,13 @@ export function purgeDeleted(state, now = new Date()) {
   return before - state.deleted.length;
 }
 
+/** @param {AppState} state @param {string} deletedId @param {string} [at] */
 export function restoreDeleted(state, deletedId, at = isoNow()) {
   const index = state.deleted.findIndex((entry) => entry.id === deletedId);
   if (index < 0) return { ok: false, reason: 'missing' };
   const [entry] = state.deleted.splice(index, 1);
   if (entry.kind === 'category_tree') {
-    const category = entry.snapshot.category;
+    const category = /** @type {import('./types.js').Category} */ (entry.snapshot.category);
     if (!getCategory(state, category.id)) state.categories.push(category);
   }
   const restored = [];

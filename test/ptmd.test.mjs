@@ -40,7 +40,7 @@ test('PTMD import isolates a parent ID that belongs to another category', () => 
   const existingParent = createItem(current, { categoryId: otherCategory.id, title: 'Existing parent' }, at).item;
   const incoming = makeEmptyState(at);
   const incomingCategory = incoming.categories[0];
-  const child = createItem(incoming, { categoryId: incomingCategory.id, title: 'Imported child' }, at).item;
+  createItem(incoming, { categoryId: incomingCategory.id, title: 'Imported child' }, at);
   const parsed = parsePTMD(exportPTMD(incoming, { scope: 'category', targetId: incomingCategory.id, exportedAt: at }).replace('"parentId":null', `"parentId":"${existingParent.id}"`));
   const preview = previewImport(current, parsed, { language: 'en', now: at });
   assert.equal(preview.ok, true);

@@ -4,6 +4,8 @@ import { initializeWithMigration, makeMigrationSnapshot, purgeMigrationSnapshots
 import { enqueueLocalChange } from './sync.js';
 import { applyDailyRollover, purgeDeleted } from './engine.js';
 
+/** @typedef {import('./types.js').AppState} AppState */
+
 function changedItemIds(before, after) {
   const previous = new Map((before?.items ?? []).map((item) => [item.id, JSON.stringify(item)]));
   const current = new Map((after?.items ?? []).map((item) => [item.id, JSON.stringify(item)]));
@@ -86,6 +88,7 @@ export class ProgressRepository {
 
   notify(meta = {}) { for (const listener of this.listeners) listener(this.state, meta); }
 
+  /** @param {AppState} nextState @param {{label?:string,queue?:boolean}} [options] */
   async commit(nextState, { label = 'local_change', queue = true } = {}) {
     if (this.state?.meta?.recoveryMode) return { ok: false, reason: 'recovery' };
     const candidate = normalizeState(nextState);
@@ -102,6 +105,7 @@ export class ProgressRepository {
     return { ok: true, state: this.state };
   }
 
+  /** @param {string} label @param {(draft:AppState,before:AppState) => any|Promise<any>} mutator @param {{queue?:boolean}} [options] */
   async update(label, mutator, options = {}, legacyOptions = null) {
     options = legacyOptions ?? options ?? {};
     const before = clone(this.state);

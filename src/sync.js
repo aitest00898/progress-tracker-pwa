@@ -1,4 +1,9 @@
 import { clone, isoNow, newId, normalizeState, SCHEMA_VERSION, validateState } from './schema.js';
+import { restoreDeleted, softDeleteItem } from './engine.js';
+
+/** @typedef {import('./types.js').AppState} AppState */
+/** @typedef {import('./types.js').ConflictArchiveEntry} ConflictArchiveEntry */
+/** @typedef {import('./types.js').SyncConflict} SyncConflict */
 
 const ITEM_FIELDS = [
   'title', 'status', 'priority', 'importance', 'plannedStart', 'dueMode', 'dueDate', 'notes', 'tags',
@@ -13,12 +18,19 @@ const TODAY_FIELDS = ['order', 'addedAt', 'source', 'completedAt'];
 const DELETED_FIELDS = ['kind', 'rootId', 'categoryId', 'parentId', 'deletedAt', 'purgeAfter', 'snapshot'];
 const HISTORY_FIELDS = ['itemId', 'type', 'metadata', 'at'];
 const BACKUP_FIELDS = ['scope', 'format', 'location', 'fileId', 'createdAt', 'independentlyRestorable', 'bytes'];
-const ARCHIVE_FIELDS = ['conflictId', 'itemId', 'entityType', 'entityId', 'field', 'type', 'chosenState', 'rejectedState', 'baseRevision', 'resolvedAt', 'purgeAfter', 'structuralSnapshot'];
+const ARCHIVE_FIELDS = ['conflictId', 'itemId', 'entityType', 'entityId', 'field', 'type', 'chosenState', 'baseState', 'rejectedState', 'restoreFields', 'baseRevision', 'resolvedAt', 'purgeAfter', 'structuralSnapshot', 'restoredAt', 'restoreCount', 'latestRestoreRevision'];
 const SYNCABLE_SETTING_PATHS = [
   'language', 'theme', 'defaultPage', 'defaultCategoryId', 'defaultSmartView', 'smartSort',
   'showCompleted', 'overdueExpanded', 'defaultReminderTime',
   'experimental.enabled', 'experimental.smart', 'experimental.routine', 'experimental.reminderLearning',
 ];
+
+/** @param {string} message @param {string} code @param {{conflictCount?: number}} [details] @returns {Error & {code: string, conflictCount?: number}} */
+function makeSyncError(message, code, details = {}) {
+  const error = new Error(message);
+  Object.assign(error, { code, ...details });
+  return /** @type {Error & {code: string, conflictCount?: number}} */ (error);
+}
 
 function copy(value) {
   return value === undefined ? undefined : clone(value);
@@ -449,6 +461,7 @@ export function coalescePendingChanges(changes) {
   return result;
 }
 
+/** @param {AppState} baseInput @param {AppState} localInput @param {AppState} remoteInput @param {{at?:string}} [options] @returns {{state:AppState,cloudState:AppState,conflicts:SyncConflict[],blockedEntities:string[],safeChanges:boolean,autoMerged:boolean}} */
 export function mergeDatasets(baseInput, localInput, remoteInput, { at = isoNow() } = {}) {
   const base = normalizeState(baseInput);
   const local = normalizeState(localInput);
@@ -460,6 +473,7 @@ export function mergeDatasets(baseInput, localInput, remoteInput, { at = isoNow(
   merged.items = itemResult.values;
   conflicts.push(...itemResult.conflicts);
 
+  /** @type {Array<[string, string, string[]]>} */
   const descriptors = [
     ['categories', 'category', CATEGORY_FIELDS],
     ['reminders', 'reminder', REMINDER_FIELDS],
@@ -469,8 +483,12 @@ export function mergeDatasets(baseInput, localInput, remoteInput, { at = isoNow(
     ['conflictArchive', 'conflict_archive', ARCHIVE_FIELDS],
   ];
   for (const [stateKey, entityType, fields] of descriptors) {
-    const result = mergeCollection(base[stateKey], local[stateKey], remote[stateKey], { entityType, fields }, at);
-    merged[stateKey] = result.values;
+    const baseRecord = /** @type {Record<string, any>} */ (base);
+    const localRecord = /** @type {Record<string, any>} */ (local);
+    const remoteRecord = /** @type {Record<string, any>} */ (remote);
+    const mergedRecord = /** @type {Record<string, any>} */ (merged);
+    const result = mergeCollection(baseRecord[stateKey], localRecord[stateKey], remoteRecord[stateKey], { entityType, fields }, at);
+    mergedRecord[stateKey] = result.values;
     conflicts.push(...result.conflicts);
   }
 
@@ -605,6 +623,235 @@ function applyConflictChoice(state, conflict, selected, revision, at) {
   }
 }
 
+const ARCHIVE_RESTORABLE_FIELDS = {
+  item: new Set([...ITEM_FIELDS, 'categoryId', 'parentId', 'activeOrder', 'completedOrder']),
+  category: new Set(CATEGORY_FIELDS),
+  reminder: new Set(REMINDER_FIELDS),
+  today: new Set(TODAY_FIELDS),
+};
+
+function archiveRestoreFields(archive) {
+  if (Array.isArray(archive.restoreFields) && archive.restoreFields.length) return [...archive.restoreFields];
+  if (archive.field) return [archive.field];
+  if (archive.type === 'parent') return ['categoryId', 'parentId'];
+  if (archive.type === 'delete_edit' && archive.baseState && archive.rejectedState && typeof archive.baseState === 'object' && typeof archive.rejectedState === 'object') {
+    const fields = ARCHIVE_RESTORABLE_FIELDS[archive.entityType] ?? new Set();
+    return [...fields].filter((field) => !equal(archive.baseState[field], archive.rejectedState[field]));
+  }
+  return [];
+}
+
+function archiveEntity(state, entityType, entityId) {
+  if (entityType === 'today') return state.today?.items?.[entityId] ?? null;
+  if (entityType === 'settings') return state.settings;
+  if (entityType === 'smart_order') return state.smartOrders;
+  return collectionForEntityType(state, entityType)?.values.find((entity) => entity.id === entityId) ?? null;
+}
+
+function findDeletedEntity(state, entityType, entityId) {
+  return (state.deleted ?? []).find((entry) => {
+    if (entityType === 'item') return entry.snapshot?.items?.some((item) => item.id === entityId);
+    if (entityType === 'category') return entry.snapshot?.category?.id === entityId;
+    return false;
+  }) ?? null;
+}
+
+function archiveChange(changes, entityType, entityId, field, currentValue, restoredValue) {
+  if (equal(currentValue, restoredValue)) return;
+  changes.push({ entityType, entityId, field, currentValue: copy(currentValue), restoredValue: copy(restoredValue) });
+}
+
+function affectedEntity(affected, entityType, entityId, fields = []) {
+  if (!entityId) return;
+  const existing = affected.find((entry) => entry.entityType === entityType && entry.entityId === entityId);
+  if (existing) existing.fields = [...new Set([...existing.fields, ...fields])];
+  else affected.push({ entityType, entityId, fields: [...new Set(fields)] });
+}
+
+function validateArchivedLocation(state, item, location) {
+  if (!location || typeof location !== 'object') return { ok: false, reason: 'missing_parent_snapshot' };
+  const categoryId = location.categoryId ?? item.categoryId;
+  if (!state.categories.some((category) => category.id === categoryId)) return { ok: false, reason: 'missing_target' };
+  const parentId = location.parentId ?? null;
+  if (!parentId) return { ok: true, categoryId, parentId: null };
+  const parent = state.items.find((candidate) => candidate.id === parentId);
+  if (!parent || parent.categoryId !== categoryId) return { ok: false, reason: 'missing_parent' };
+  const seen = new Set([item.id]);
+  let cursor = parent;
+  while (cursor) {
+    if (seen.has(cursor.id)) return { ok: false, reason: 'cycle' };
+    seen.add(cursor.id);
+    cursor = cursor.parentId ? state.items.find((candidate) => candidate.id === cursor.parentId) : null;
+  }
+  return { ok: true, categoryId, parentId };
+}
+
+function applyArchiveField(working, archive, changes, affected) {
+  const entityType = archive.entityType ?? 'item';
+  const entityId = archive.entityId ?? archive.itemId;
+  const field = archive.field;
+  if (entityType === 'settings') {
+    if (!SYNCABLE_SETTING_PATHS.includes(entityId)) return { ok: false, reason: 'unsafe_field' };
+    const currentValue = valueAtPath(working.settings, entityId);
+    archiveChange(changes, entityType, entityId, entityId, currentValue, archive.rejectedState);
+    if (!equal(currentValue, archive.rejectedState)) setAtPath(working.settings, entityId, archive.rejectedState);
+    return { ok: true };
+  }
+  const allowed = ARCHIVE_RESTORABLE_FIELDS[entityType];
+  if (!allowed?.has(field)) return { ok: false, reason: 'unsafe_field' };
+  const entity = archiveEntity(working, entityType, entityId);
+  if (!entity) return { ok: false, reason: 'missing_target' };
+  const currentValue = entity[field];
+  archiveChange(changes, entityType, entityId, field, currentValue, archive.rejectedState);
+  entity[field] = copy(archive.rejectedState);
+  affectedEntity(affected, entityType, entityId, [field]);
+  return { ok: true };
+}
+
+function applyArchiveParent(working, archive, changes, affected) {
+  const entityId = archive.entityId ?? archive.itemId;
+  const item = working.items.find((candidate) => candidate.id === entityId);
+  if (!item) return { ok: false, reason: 'missing_target' };
+  const location = validateArchivedLocation(working, item, archive.rejectedState);
+  if (!location.ok) return location;
+  archiveChange(changes, 'item', entityId, 'categoryId', item.categoryId, location.categoryId);
+  archiveChange(changes, 'item', entityId, 'parentId', item.parentId, location.parentId);
+  item.categoryId = location.categoryId;
+  item.parentId = location.parentId;
+  affectedEntity(affected, 'item', entityId, ['categoryId', 'parentId']);
+  return { ok: true };
+}
+
+function applyArchiveOrder(working, archive, changes, affected) {
+  if (archive.entityType === 'smart_order') {
+    if (!Array.isArray(archive.rejectedState)) return { ok: false, reason: 'missing_order_snapshot' };
+    const current = working.smartOrders?.[archive.entityId] ?? [];
+    archiveChange(changes, 'smart_order', archive.entityId, 'order', current, archive.rejectedState);
+    working.smartOrders[archive.entityId] = copy(archive.rejectedState);
+    return { ok: true };
+  }
+  if (archive.entityType !== 'sibling_order' || !Array.isArray(archive.rejectedState)) return { ok: false, reason: 'missing_order_snapshot' };
+  let current;
+  try { current = orderedIds(working, archive.entityId); } catch { return { ok: false, reason: 'missing_order_snapshot' }; }
+  const rejected = archive.rejectedState;
+  if (current.length !== rejected.length || new Set(current).size !== new Set(rejected).size || current.some((id) => !rejected.includes(id))) {
+    return { ok: false, reason: 'order_target_changed' };
+  }
+  const descriptor = orderGroupDescriptor(archive.entityId);
+  applyOrder(working, archive.entityId, rejected);
+  for (const id of rejected) {
+    const item = working.items.find((candidate) => candidate.id === id);
+    const before = current.indexOf(id);
+    const after = rejected.indexOf(id);
+    if (before !== after) {
+      archiveChange(changes, 'item', id, descriptor.orderField, before, after);
+      affectedEntity(affected, 'item', id, [descriptor.orderField]);
+    }
+    if (!item) return { ok: false, reason: 'missing_target' };
+  }
+  return { ok: true };
+}
+
+function applyArchiveDeleteEdit(working, archive, changes, affected, at) {
+  const entityType = archive.entityType ?? 'item';
+  const entityId = archive.entityId ?? archive.itemId;
+  const current = archiveEntity(working, entityType, entityId);
+  if (archive.rejectedState === null) {
+    if (entityType !== 'item' || !current) return { ok: false, reason: 'missing_target' };
+    const result = softDeleteItem(working, entityId, at);
+    if (!result.ok) return result;
+    changes.push({ entityType, entityId, field: null, currentValue: 'present', restoredValue: 'deleted' });
+    return { ok: true };
+  }
+  if (!current) {
+    const deleted = findDeletedEntity(working, entityType, entityId);
+    if (!deleted || entityType !== 'item') return { ok: false, reason: 'missing_target' };
+    const result = restoreDeleted(working, deleted.id, at);
+    if (!result.ok) return result;
+    for (const id of result.restored ?? []) affectedEntity(affected, 'item', id, [...ITEM_FIELDS, 'categoryId', 'parentId']);
+    changes.push({ entityType, entityId, field: null, currentValue: 'deleted', restoredValue: 'present' });
+    return { ok: true };
+  }
+  const fields = archiveRestoreFields(archive);
+  if (!fields.length) return { ok: false, reason: 'missing_restore_scope' };
+  if (fields.includes('categoryId') || fields.includes('parentId')) {
+    const location = validateArchivedLocation(working, current, archive.rejectedState);
+    if (!location.ok) return location;
+    current.categoryId = location.categoryId;
+    current.parentId = location.parentId;
+    affectedEntity(affected, entityType, entityId, ['categoryId', 'parentId']);
+  }
+  for (const field of fields.filter((candidate) => candidate !== 'categoryId' && candidate !== 'parentId')) {
+    if (!ARCHIVE_RESTORABLE_FIELDS[entityType]?.has(field)) return { ok: false, reason: 'unsafe_field' };
+    archiveChange(changes, entityType, entityId, field, current[field], archive.rejectedState[field]);
+    current[field] = copy(archive.rejectedState[field]);
+    affectedEntity(affected, entityType, entityId, [field]);
+  }
+  return { ok: true };
+}
+
+/** @returns {{ok:boolean, changed?:boolean, reason?:string, errors?:unknown[], changes?:Array<Record<string, unknown>>, affected?:unknown[], itemId?:string|null}} */
+function applyArchiveRestore(working, archive, at) {
+  const changes = [];
+  const affected = [];
+  if (!archive) return { ok: false, reason: 'missing' };
+  if (archive.purgeAfter && new Date(archive.purgeAfter).getTime() <= new Date(at).getTime()) return { ok: false, reason: 'expired' };
+  let result;
+  if (archive.type === 'parent') result = applyArchiveParent(working, archive, changes, affected);
+  else if (archive.type === 'order') result = applyArchiveOrder(working, archive, changes, affected);
+  else if (archive.type === 'delete_edit') result = applyArchiveDeleteEdit(working, archive, changes, affected, at);
+  else if (archive.type === 'field' || archive.type === 'membership') result = applyArchiveField(working, archive, changes, affected);
+  else result = { ok: false, reason: 'unsupported_restore_scope' };
+  if (!result.ok) return { ...result, changes, affected };
+  const validation = validateState(working);
+  if (validation.length) return { ok: false, reason: validation.some((error) => error.type === 'hierarchy_cycle') ? 'cycle' : 'validation', errors: validation, changes, affected };
+  return { ok: true, changed: changes.length > 0, changes, affected, itemId: archive.itemId ?? (archive.entityType === 'item' ? archive.entityId : null) };
+}
+
+function touchArchiveAffected(working, affected, revision, at) {
+  for (const entry of affected) {
+    const entity = archiveEntity(working, entry.entityType, entry.entityId);
+    if (entity && entry.entityType !== 'settings' && entry.entityType !== 'smart_order') touchResolvedEntity(entity, entry.fields.length === 1 ? entry.fields[0] : null, revision, at);
+  }
+}
+
+/** @param {AppState} state @param {string} archiveId @param {string} [at] @returns {{ok:boolean, changed?:boolean, reason?:string, errors?:unknown[], changes?:Array<Record<string, unknown>>, affected?:unknown[]}} */
+export function conflictArchiveRestorePreview(state, archiveId, at = isoNow()) {
+  const archive = state.conflictArchive.find((entry) => entry.id === archiveId);
+  return applyArchiveRestore(copy(state), archive, at);
+}
+
+/** @param {AppState} state @param {string} archiveId @param {string} [at] @returns {{ok:boolean, changed?:boolean, reason?:string, errors?:unknown[], revision?:number, archive?:ConflictArchiveEntry, changes?:Array<Record<string, unknown>>}} */
+export function restoreConflictArchive(state, archiveId, at = isoNow()) {
+  const archive = state.conflictArchive.find((entry) => entry.id === archiveId);
+  const working = copy(state);
+  const preview = applyArchiveRestore(working, archive, at);
+  if (!preview.ok || !preview.changed) return preview.ok ? { ...preview, changed: false } : preview;
+  const revision = Number(working.meta.revision ?? 0) + 1;
+  touchArchiveAffected(working, preview.affected, revision, at);
+  const restoredArchive = working.conflictArchive.find((entry) => entry.id === archiveId);
+  if (restoredArchive) {
+    restoredArchive.restoredAt = at;
+    restoredArchive.restoreCount = Number(restoredArchive.restoreCount ?? 0) + 1;
+    restoredArchive.latestRestoreRevision = revision;
+  }
+  working.meta.revision = revision;
+  working.meta.updatedAt = at;
+  working.history.push({
+    id: newId('hist'),
+    itemId: preview.itemId,
+    type: 'conflict_archive_restored',
+    metadata: { conflictId: archiveId, conflictType: archive.type, field: archive.field ?? null },
+    at,
+  });
+  const validation = validateState(working);
+  if (validation.length) return { ok: false, reason: 'validation', errors: validation };
+  for (const key of Object.keys(state)) delete state[key];
+  Object.assign(state, working);
+  return { ok: true, changed: true, changes: preview.changes, archive: restoredArchive, revision };
+}
+
+/** @param {AppState} state @param {string} conflictId @param {string} choice @param {string} [at] */
 export function resolveConflict(state, conflictId, choice, at = isoNow()) {
   const localChoice = ['local', 'keep_local', 'keep_edit'].includes(choice);
   const remoteChoice = ['remote', 'keep_cloud', 'keep_delete'].includes(choice);
@@ -641,10 +888,15 @@ export function resolveConflict(state, conflictId, choice, at = isoNow()) {
     field: conflict.field ?? null,
     type: conflict.type,
     chosenState: localChoice ? 'local' : 'remote',
+    baseState: copy(conflict.baseState),
     rejectedState: copy(rejected),
+    restoreFields: archiveRestoreFields({ ...conflict, baseState: conflict.baseState, rejectedState: rejected }),
     baseRevision: working.meta.baseRevision,
     resolvedAt: at,
     purgeAfter: new Date(new Date(at).getTime() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+    restoredAt: null,
+    restoreCount: 0,
+    latestRestoreRevision: null,
     structuralSnapshot: ['parent', 'order'].includes(conflict.type) ? {
       group: copy(conflict.group),
       baseState: copy(conflict.baseState),
@@ -666,6 +918,7 @@ export function pendingConflicts(state) {
   return (state.conflicts ?? []).filter((conflict) => conflict.status !== 'resolved');
 }
 
+/** @param {AppState} state @returns {{ok:true,count?:number}|{ok:false,reason:string,count?:number}} */
 export function canPushState(state) {
   if (state.meta?.recoveryMode) return { ok: false, reason: 'recovery' };
   const conflicts = pendingConflicts(state);
@@ -692,13 +945,11 @@ function sanitizedCloudSettings(settings) {
   };
 }
 
+/** @param {AppState} state @returns {{identity:Record<string, unknown>,state:AppState}} */
 export function buildSyncPayload(state) {
   const gate = canPushState(state);
-  if (!gate.ok) {
-    const error = new Error(gate.reason);
-    error.code = gate.reason;
-    error.conflictCount = gate.count ?? 0;
-    throw error;
+  if (gate.ok !== true) {
+    throw makeSyncError(gate.reason, gate.reason, { conflictCount: gate.count ?? 0 });
   }
   const payload = copy(state);
   delete payload.meta.syncBaseState;
@@ -716,7 +967,7 @@ export function buildSyncPayload(state) {
 }
 
 export function hasIndependentBackup(state) {
-  const metadataBackup = (state.backupMeta ?? []).some((backup) => backup.scope === 'full' && backup.independentlyRestorable === true && backup.deletedAt == null);
+  const metadataBackup = (state.backupMeta ?? []).some((backup) => backup.scope === 'full' && backup.independentlyRestorable === true && (backup.deletedAt === null || backup.deletedAt === undefined));
   const managedCloudBackup = (state.settings?.cloudSync?.visibleBackups ?? []).some((file) => file.appProperties?.scope === 'full' && file.appProperties?.datasetId === state.meta.datasetId);
   return metadataBackup || managedCloudBackup;
 }
@@ -793,7 +1044,7 @@ export class GoogleDriveSync {
     if (!this.clientId) throw new Error('Google OAuth Client ID is required');
     if (!globalThis.google?.accounts?.oauth2) throw new Error('Google Identity Services is not available');
     const token = await new Promise((resolve, reject) => {
-      this.client = google.accounts.oauth2.initTokenClient({
+      this.client = globalThis.google.accounts.oauth2.initTokenClient({
         client_id: this.clientId,
         scope: 'https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file',
         callback: resolve,
@@ -894,19 +1145,14 @@ export class GoogleDriveSync {
 
   async push(state, fileId = null) {
     const gate = canPushState(state);
-    if (!gate.ok) {
-      const error = new Error(gate.reason);
-      error.code = gate.reason;
-      error.conflictCount = gate.count ?? 0;
-      throw error;
+    if (gate.ok !== true) {
+      throw makeSyncError(gate.reason, gate.reason, { conflictCount: gate.count ?? 0 });
     }
     if (fileId) {
       const metadata = await this.fileMetadata(fileId);
       const actualDatasetId = metadata.appProperties?.datasetId ?? null;
       if (actualDatasetId && actualDatasetId !== state.meta.datasetId) {
-        const error = new Error('dataset_mismatch');
-        error.code = 'dataset_mismatch';
-        throw error;
+        throw makeSyncError('dataset_mismatch', 'dataset_mismatch');
       }
     }
     const payload = JSON.stringify(buildSyncPayload(state));
