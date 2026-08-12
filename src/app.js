@@ -30,6 +30,14 @@ import {
   focusableSelector, isRowPressCancellation,
 } from './interaction.js';
 import { FEEDBACK_MODES, mutationFeedback } from './feedback.js';
+import {
+  CALENDAR_ALERT_OPTIONS, buildCalendarICS, buildItemCalendarEvent, buildReminderCalendarEvent,
+  calendarFilename, shareCalendarFile,
+} from './calendar.js';
+import {
+  SEARCH_DRAWER_STATES, SEARCH_PULL_CONFIG, createSearchPullSession,
+  resolveSearchPullRelease, updateSearchPullSession,
+} from './search-pull.js';
 
 const root = /** @type {HTMLElement} */ (document.querySelector('#app'));
 let repository;
@@ -50,6 +58,8 @@ let modalFocusOwner = null;
 let modalReturnFocus = null;
 let modalFocusPending = false;
 let modalFocusTimer = null;
+let searchPullCleanup = null;
+/** @type {Record<string, any>} */
 const ui = {
   page: 'categories', categoryId: null, smartView: 'today', settingsPage: 'general', detailId: null,
   search: '', tag: '', quickActionId: null, addChildFor: null, expanded: new Set(), focusRoot: null, notesTab: 'edit',
@@ -58,12 +68,108 @@ const ui = {
   dragTargetId: null, dragTargetPosition: null,
   routineSuggestionId: null, reminderCenter: false,
   highlightId: null,
+  searchDrawer: SEARCH_DRAWER_STATES.CLOSED, searchPullDistance: 0, searchFilter: 'all',
+  calendarAlertByItem: {},
 };
 
 function currentState() { return repository.getState(); }
 function renderIndex(state) { return renderEngineIndex?.state === state ? renderEngineIndex : createEngineIndex(state); }
 function language() { return currentState()?.settings?.language === 'en' ? 'en' : 'zh-TW'; }
 function tr(key, vars) { return t(language(), key, vars); }
+
+function isMobileViewport() { return typeof window !== 'undefined' && window.innerWidth <= 700; }
+
+function calendarPreferenceKey(state) {
+  return `progress-tracker-calendar-preferences:${state?.meta?.datasetId ?? 'local'}`;
+}
+
+function loadCalendarPreferences(state) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(calendarPreferenceKey(state)) ?? '{}');
+    ui.calendarAlertByItem = saved?.alerts && typeof saved.alerts === 'object' ? saved.alerts : {};
+  } catch {
+    ui.calendarAlertByItem = {};
+  }
+}
+
+function calendarAlertFor(itemId) { return ui.calendarAlertByItem[itemId] ?? 'none'; }
+
+function saveCalendarAlert(state, itemId, value) {
+  ui.calendarAlertByItem[itemId] = value;
+  try {
+    localStorage.setItem(calendarPreferenceKey(state), JSON.stringify({ alerts: ui.calendarAlertByItem }));
+  } catch { /* local presentation preference is optional */ }
+}
+
+function recentSearches(state) {
+  try {
+    const value = JSON.parse(localStorage.getItem(`progress-tracker-recent-searches:${state?.meta?.datasetId ?? 'local'}`) ?? '[]');
+    return Array.isArray(value) ? value.filter((entry) => typeof entry === 'string' && entry.trim()).slice(0, 6) : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberSearch(state, value = ui.search) {
+  const query = String(value ?? '').trim();
+  if (!query) return;
+  const next = [query, ...recentSearches(state).filter((entry) => entry !== query)].slice(0, 6);
+  try { localStorage.setItem(`progress-tracker-recent-searches:${state?.meta?.datasetId ?? 'local'}`, JSON.stringify(next)); } catch { /* local UI preference only */ }
+}
+
+function openSearchDrawer() {
+  if (!isMobileViewport() || ui.detailId || ui.modal) return;
+  ui.searchDrawer = SEARCH_DRAWER_STATES.OPEN;
+  ui.searchPullDistance = 0;
+  scheduleRender();
+  setTimeout(() => /** @type {HTMLInputElement|null} */ (document.querySelector('.mobile-search-input'))?.focus({ preventScroll: true }), 0);
+}
+
+function closeSearchDrawer({ remember = true } = {}) {
+  if (remember) rememberSearch(currentState());
+  if (ui.searchDrawer === SEARCH_DRAWER_STATES.CLOSED) return;
+  ui.searchDrawer = SEARCH_DRAWER_STATES.CLOSING;
+  ui.searchPullDistance = 0;
+  scheduleRender();
+  setTimeout(() => {
+    if (ui.searchDrawer === SEARCH_DRAWER_STATES.CLOSING) {
+      ui.searchDrawer = SEARCH_DRAWER_STATES.CLOSED;
+      scheduleRender();
+    }
+  }, 180);
+}
+
+function searchFilterMatches(state, item, filter) {
+  if (filter === 'all') return true;
+  const index = renderIndex(state);
+  const progress = progressResultForItem(state, item.id, index.progressResultByItem, new Set(), index);
+  const progressValue = progressPresentation(progress).numeric;
+  const due = effectiveDue(state, item.id, index).value;
+  if (filter === 'progress') return progressValue > 0 && item.status !== 'completed';
+  if (filter === 'completed') return item.status === 'completed';
+  if (filter === 'notStarted') return progressValue === 0 && item.status === 'active';
+  if (filter === 'overdue') return Boolean(due && dateKey(due) < dateKey(renderNow) && item.status !== 'completed');
+  return true;
+}
+
+function filteredSearchItems(state) {
+  const index = renderIndex(state);
+  const query = ui.search.trim();
+  const candidates = query || ui.tag.trim()
+    ? searchItems(state, query, ui.tag, index)
+    : state.items.filter((item) => item.status !== 'skipped' && item.status !== 'completed');
+  return candidates.filter((item) => searchFilterMatches(state, item, ui.searchFilter));
+}
+
+function openQuickCreate({ categoryId = null, parentId = null } = {}) {
+  const state = currentState();
+  if (!state || state.meta.recoveryMode) return;
+  const targetCategory = categoryId ?? ui.categoryId ?? state.settings.defaultCategoryId ?? state.categories[0]?.id ?? null;
+  if (!targetCategory) { toast(tr('errorNoCategory'), 'error'); return; }
+  ui.searchDrawer = SEARCH_DRAWER_STATES.CLOSED;
+  ui.modal = { kind: 'quickCreate', title: parentId ? tr('addChild') : tr('addItem'), categoryId: targetCategory, parentId };
+  scheduleRender();
+}
 
 /** @param {string} tag @param {Record<string, any>} [attributes] @param {unknown[]} children @returns {any} */
 function node(tag, attributes = {}, ...children) {
@@ -242,7 +348,7 @@ function virtualViewKey(state = currentState()) {
   if (ui.page === 'smart') return `smart:${ui.smartView}`;
   const categoryId = ui.categoryId ?? state.settings.defaultCategoryId ?? state.categories[0]?.id ?? '';
   const focus = focusRootForCategory(state, categoryId) ?? '';
-  const context = ui.search.trim() ? `search:${ui.search.trim()}:${ui.tag.trim()}` : `tree:${focus}`;
+  const context = ui.search.trim() || ui.searchFilter !== 'all' ? `search:${ui.search.trim()}:${ui.tag.trim()}:${ui.searchFilter}` : `tree:${focus}`;
   return `category:${categoryId}:${context}`;
 }
 
@@ -341,6 +447,8 @@ function clearGestureClasses() {
 
 function clearTransientInteractionState({ preserveSelection = false } = {}) {
   gestureController?.cancelAll();
+  ui.searchDrawer = SEARCH_DRAWER_STATES.CLOSED;
+  ui.searchPullDistance = 0;
   ui.quickActionId = null;
   ui.addChildFor = null;
   ui.dragItemId = null;
@@ -588,6 +696,80 @@ function installGestureController() {
   });
 }
 
+function installSearchPullController() {
+  searchPullCleanup?.();
+  const sessions = new Map();
+  const viewportFor = (target) => /** @type {Element|null} */ (target)?.closest?.('.tree-list-holder .virtual-viewport, .search-list-holder .virtual-viewport');
+  const controlFor = (target) => /** @type {Element|null} */ (target)?.closest?.('button, input, textarea, select, a, .item-row');
+  const onPointerDown = (event) => {
+    if (!isMobileViewport() || !event.isPrimary || ui.detailId || ui.modal || ui.page !== 'categories') return;
+    const target = /** @type {Element|null} */ (event.target);
+    const drawer = target?.closest?.('.mobile-search-drawer');
+    const isTouchLike = event.pointerType === 'touch' || event.pointerType === 'pen';
+    if (!isTouchLike || (drawer && controlFor(target))) return;
+    let mode = null;
+    let origin = null;
+    if (drawer && ui.searchDrawer === SEARCH_DRAWER_STATES.OPEN) {
+      mode = 'close';
+      origin = drawer;
+    } else {
+      const viewport = viewportFor(target);
+      if (!viewport || viewport.scrollTop > 0 || controlFor(target)) return;
+      mode = 'open';
+      origin = viewport;
+    }
+    const session = createSearchPullSession({ pointerId: event.pointerId, mode, startX: event.clientX, startY: event.clientY });
+    sessions.set(event.pointerId, session);
+    origin?.setPointerCapture?.(event.pointerId);
+  };
+  const onPointerMove = (event) => {
+    const previous = sessions.get(event.pointerId);
+    if (!previous) return;
+    const result = updateSearchPullSession(previous, { x: event.clientX, y: event.clientY }, SEARCH_PULL_CONFIG);
+    sessions.set(event.pointerId, result.session);
+    if (result.cancelled) return;
+    if (result.claimed) {
+      event.preventDefault();
+      ui.searchPullDistance = result.distance;
+      ui.searchDrawer = result.session.mode === 'close' ? SEARCH_DRAWER_STATES.CLOSING : SEARCH_DRAWER_STATES.PULLING;
+      scheduleRender();
+    }
+  };
+  const finish = (event) => {
+    const session = sessions.get(event.pointerId);
+    if (!session) return;
+    sessions.delete(event.pointerId);
+    const next = resolveSearchPullRelease(session);
+    ui.searchPullDistance = 0;
+    if (next === SEARCH_DRAWER_STATES.OPEN) openSearchDrawer();
+    else if (next === SEARCH_DRAWER_STATES.CLOSED && session.mode === 'close') closeSearchDrawer();
+    else {
+      ui.searchDrawer = session.mode === 'close' ? SEARCH_DRAWER_STATES.OPEN : SEARCH_DRAWER_STATES.CLOSED;
+      scheduleRender();
+    }
+  };
+  const onPointerCancel = (event) => {
+    const session = sessions.get(event.pointerId);
+    if (!session) return;
+    sessions.delete(event.pointerId);
+    ui.searchPullDistance = 0;
+    ui.searchDrawer = session.mode === 'close' ? SEARCH_DRAWER_STATES.OPEN : SEARCH_DRAWER_STATES.CLOSED;
+    scheduleRender();
+  };
+  root.addEventListener('pointerdown', onPointerDown, { capture: true, passive: true });
+  root.addEventListener('pointermove', onPointerMove, { capture: true, passive: false });
+  root.addEventListener('pointerup', finish, { capture: true, passive: true });
+  root.addEventListener('pointercancel', onPointerCancel, { capture: true, passive: true });
+  searchPullCleanup = () => {
+    sessions.clear();
+    root.removeEventListener('pointerdown', onPointerDown, true);
+    root.removeEventListener('pointermove', onPointerMove, true);
+    root.removeEventListener('pointerup', finish, true);
+    root.removeEventListener('pointercancel', onPointerCancel, true);
+  };
+  return searchPullCleanup;
+}
+
 function handleKeyboardShortcuts(event) {
   if (event.key === 'Escape') {
     if (ui.modal) { closeModal(); return; }
@@ -602,8 +784,15 @@ function handleKeyboardShortcuts(event) {
   const editing = target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName);
   if (editing) return;
   if (event.key === '?' || (event.key === '/' && event.shiftKey)) { event.preventDefault(); openInfoModal(tr('keyboardShortcuts')); }
-  else if (event.key === '/') { event.preventDefault(); (/** @type {HTMLInputElement|null} */ (document.querySelector('.global-search')))?.focus(); }
-  else if (event.key.toLowerCase() === 'n' && ui.page === 'categories') { event.preventDefault(); (/** @type {HTMLInputElement|null} */ (document.querySelector('.quick-create-input')))?.focus(); }
+  else if (event.key === '/') {
+    event.preventDefault();
+    if (isMobileViewport() && ui.page === 'categories') openSearchDrawer();
+    else (/** @type {HTMLInputElement|null} */ (document.querySelector('.global-search')))?.focus();
+  }
+  else if (event.key.toLowerCase() === 'n' && ['categories', 'today', 'smart'].includes(ui.page)) {
+    event.preventDefault();
+    openQuickCreate();
+  }
 }
 
 function categoryDepthLimit() { return Math.max(2, Math.floor((window.innerWidth - (window.innerWidth < 720 ? 32 : 360)) / 145)); }
@@ -619,6 +808,8 @@ function setPage(page, value = null) {
 
 function openDetail(itemId) {
   if (!getItem(currentState(), itemId)) return;
+  ui.searchDrawer = SEARCH_DRAWER_STATES.CLOSED;
+  ui.searchPullDistance = 0;
   ui.detailId = itemId;
   ui.contextItemId = null;
   mutate('detail_opened', (state) => { recordSemantic(state, 'detail_opened', { page: 'detail' }); return { ok: true }; }, null, { queue: false });
@@ -626,7 +817,7 @@ function openDetail(itemId) {
 }
 
 function focusItem(item) {
-  ui.page = 'categories'; ui.categoryId = item.categoryId; ui.focusRoot = item.id; ui.search = ''; ui.highlightId = item.id;
+  ui.page = 'categories'; ui.categoryId = item.categoryId; ui.focusRoot = item.id; ui.search = ''; ui.searchDrawer = SEARCH_DRAWER_STATES.CLOSED; ui.searchFilter = 'all'; ui.highlightId = item.id;
   mutate('search_focus', (draft) => {
     const expanded = new Set(draft.settings.expandedByCategory[item.categoryId] ?? []);
     for (const ancestor of itemPath(draft, item.id)) expanded.add(ancestor.id);
@@ -686,6 +877,7 @@ function renderShell(state) {
   body.append(main);
   shell.append(body);
   if (!recoveryMode) shell.append(renderMobileNav(state));
+  if (!recoveryMode && !ui.detailId && !ui.modal) shell.append(renderMobileFab(state));
   const detailItem = !recoveryMode && ui.detailId ? getItem(state, ui.detailId, index) : null;
   if (detailItem) shell.append(renderDetailPanel(state, detailItem));
   if (ui.modal) shell.append(renderModal(state));
@@ -757,6 +949,15 @@ function renderMobileNav(state) {
   return node('nav', { class: 'mobile-nav', 'aria-label': tr('menu') }, navButton(tr('navCategories'), 'categories', ui.page === 'categories', () => setPage('categories', ui.categoryId ?? state.settings.defaultCategoryId), '▦'), navButton(tr('navToday'), 'today', ui.page === 'today', () => setPage('today'), '◷'), navButton(tr('navReminders'), 'reminders', ui.page === 'reminders', () => setPage('reminders'), '⌁'), navButton(tr('navSmart'), 'smart', ui.page === 'smart', () => setPage('smart', ui.smartView), '✦'), navButton(tr('navSettings'), 'settings', ui.page === 'settings', () => setPage('settings'), '⚙'));
 }
 
+function renderMobileFab(state) {
+  if (!isMobileViewport() || !['categories', 'today', 'smart'].includes(ui.page)) return null;
+  return button('+', () => openQuickCreate(), {
+    className: 'mobile-fab',
+    ariaLabel: tr('addItem'),
+    title: tr('addItem'),
+  });
+}
+
 function renderCategoryPage(state) {
   const index = renderIndex(state);
   const categoryId = ui.categoryId ?? state.settings.defaultCategoryId ?? state.categories[0]?.id;
@@ -764,11 +965,46 @@ function renderCategoryPage(state) {
   if (!category) return renderEmptyState('errorNoCategory', 'addCategory', openCategoryCreate);
   ui.categoryId = category.id;
   const page = node('section', { class: 'page category-page' });
-  const header = node('div', { class: 'page-header' }, node('div', { class: 'page-header-main' }, renderCategoryBreadcrumb(state, category), heading(category.title, 1), node('p', { class: 'page-subtitle' }, `${index.itemsByCategory.get(category.id)?.length ?? 0} · ${tr('swipeComplete')} · ${tr('swipeDelete')}`)), node('div', { class: 'page-header-actions' }, button(tr('addItem'), () => { ui.quickActionId = null; (/** @type {HTMLInputElement|null} */ (document.querySelector('.quick-create-input')))?.focus(); }, { className: 'primary-button', icon: '+' }), iconButton('⌘', tr('keyboardShortcuts'), () => openInfoModal(tr('keyboardShortcuts')))));
+  const header = node('div', { class: 'page-header' }, node('div', { class: 'page-header-main' }, renderCategoryBreadcrumb(state, category), heading(category.title, 1)), node('div', { class: 'page-header-actions' }, button(tr('addItem'), () => openQuickCreate({ categoryId: category.id }), { className: 'primary-button', icon: '+' }), iconButton('⌘', tr('keyboardShortcuts'), () => openInfoModal(tr('keyboardShortcuts')))));
   page.append(header);
-  if (ui.search.trim()) page.append(renderSearchResults(state));
-  else page.append(renderQuickCreate(state, category), renderTreeList(state, category));
+  page.append(renderMobileSearchAffordance(state));
+  if (ui.search.trim() || ui.searchFilter !== 'all') page.append(renderSearchResults(state));
+  else page.append(renderTreeList(state, category));
   return page;
+}
+
+function renderMobileSearchAffordance(state) {
+  const drawerOpen = [SEARCH_DRAWER_STATES.OPEN, SEARCH_DRAWER_STATES.PULLING, SEARCH_DRAWER_STATES.CLOSING].includes(ui.searchDrawer);
+  const affordance = node('button', {
+    type: 'button',
+    class: `mobile-search-affordance ${ui.searchDrawer === SEARCH_DRAWER_STATES.PULLING ? 'is-pulling' : ''}`,
+    style: { '--search-pull-distance': `${ui.searchPullDistance}px` },
+    ariaLabel: tr('pullToSearch'),
+    onClick: openSearchDrawer,
+  }, node('span', { class: 'mobile-search-grabber', ariaHidden: 'true' }), icon('⌕', tr('search')), node('span', {}, tr('pullToSearch')));
+  if (!drawerOpen) return node('div', { class: 'mobile-search-surface' }, affordance);
+
+  const recent = recentSearches(state);
+  const filterOptions = [
+    ['all', tr('filterAll')], ['progress', tr('filterHasProgress')], ['completed', tr('filterCompleted')],
+    ['notStarted', tr('filterNotStarted')], ['overdue', tr('filterOverdue')],
+  ];
+  const drawer = node('section', {
+    class: `mobile-search-drawer ${ui.searchDrawer === SEARCH_DRAWER_STATES.CLOSING ? 'is-closing' : ''}`,
+    role: 'search',
+    'aria-label': tr('search'),
+  });
+  const input = node('input', {
+    class: 'mobile-search-input', type: 'search', value: ui.search, placeholder: tr('searchPlaceholder'),
+    ariaLabel: tr('searchPlaceholder'),
+    onInput: (event) => { ui.search = event.target.value; scheduleRender(); },
+    onKeydown: (event) => { if (event.key === 'Escape') { event.preventDefault(); closeSearchDrawer(); } },
+  });
+  const searchField = node('div', { class: 'mobile-search-field' }, icon('⌕', tr('search')), input, ui.search ? iconButton('×', tr('clearFilter'), () => { ui.search = ''; scheduleRender(); }, { className: 'mobile-search-clear' }) : null);
+  const recentRow = node('div', { class: 'mobile-search-group' }, node('div', { class: 'mobile-search-group-title' }, node('span', {}, tr('recentSearches')), recent.length ? button(tr('clear'), () => { try { localStorage.removeItem(`progress-tracker-recent-searches:${state?.meta?.datasetId ?? 'local'}`); } catch {} scheduleRender(); }, { className: 'text-button' }) : null), node('div', { class: 'search-chip-row' }, ...recent.map((query) => button(query, () => { ui.search = query; ui.searchFilter = 'all'; scheduleRender(); }, { className: 'search-chip', ariaLabel: `${tr('search')}: ${query}` }))));
+  const filters = node('div', { class: 'mobile-search-group' }, node('div', { class: 'mobile-search-group-title' }, tr('quickFilters')), node('div', { class: 'search-chip-row filter-chip-row' }, ...filterOptions.map(([value, label]) => button(label, () => { ui.searchFilter = value; scheduleRender(); }, { className: `search-chip filter-chip ${ui.searchFilter === value ? 'active' : ''}`, ariaSelected: ui.searchFilter === value }))));
+  drawer.append(node('div', { class: 'mobile-search-drawer-header' }, node('span', { class: 'mobile-search-drawer-grabber', ariaHidden: 'true' }), iconButton('×', tr('close'), closeSearchDrawer, { className: 'mobile-search-close' })), searchField, recentRow, filters);
+  return node('div', { class: 'mobile-search-surface' }, drawer);
 }
 
 function renderCategoryBreadcrumb(state, category) {
@@ -786,33 +1022,30 @@ function renderCategoryBreadcrumb(state, category) {
   return node('nav', { class: 'breadcrumbs', 'aria-label': tr('path') }, ...crumbs);
 }
 
-function renderQuickCreate(state, category) {
-  const submit = () => { void createFromQuickInput(state, category.id); };
-  const form = node('form', { class: 'quick-create', onSubmit: (event) => { stop(event); submit(); } });
-  const input = node('input', {
-    class: 'quick-create-input',
-    type: 'text',
-    placeholder: tr('quickCreatePlaceholder'),
-    ariaLabel: tr('addItem'),
-    onKeydown: (event) => {
-      if (event.key === 'Enter' && !event.isComposing) {
-        stop(event);
-        submit();
-      }
-    },
-  });
-  const mode = node('label', { class: 'continuous-toggle' }, node('input', { type: 'checkbox', checked: ui.continuousCreate, onChange: (event) => { ui.continuousCreate = event.target.checked; } }), node('span', {}, tr('quickCreateHint')));
-  const quickCreateSubmit = node('button', { type: 'submit', class: 'quick-create-submit', ariaLabel: tr('addItem'), title: tr('addItem') }, '+');
-  form.append(quickCreateSubmit, input, button(tr('addItem'), submit, { className: 'primary-button quick-create-button' }), mode);
-  return form;
-}
-
 async function createFromQuickInput(state, categoryId, parentId = null) {
   const input = /** @type {HTMLInputElement|null} */ (document.querySelector('.quick-create-input'));
   const title = input?.value?.trim();
   if (!title) { input?.focus(); toast(tr('errorRequired'), 'error'); return; }
-  const result = await mutate(parentId ? 'add_child' : 'create_item', (draft) => createItem(draft, { categoryId, parentId, title }), null);
-  if (result.ok) { if (input) input.value = ''; if (!ui.continuousCreate) input?.blur(); recordSemantic(currentState(), parentId ? 'add_child' : 'create', {}); input?.focus(); }
+  const result = await mutate(parentId ? 'add_child' : 'create_item', (draft) => {
+    const created = createItem(draft, { categoryId, parentId, title });
+    if (created.ok && parentId) {
+      const expanded = new Set(draft.settings.expandedByCategory[categoryId] ?? []);
+      expanded.add(parentId);
+      draft.settings.expandedByCategory[categoryId] = [...expanded];
+    }
+    return created;
+  }, null);
+  if (result.ok) {
+    if (input) input.value = '';
+    if (ui.modal?.kind === 'quickCreate') ui.modal.value = '';
+    recordSemantic(currentState(), parentId ? 'add_child' : 'create', {});
+    if (!ui.continuousCreate) {
+      input?.blur();
+      if (ui.modal?.kind === 'quickCreate') ui.modal = null;
+    }
+    scheduleRender();
+    if (ui.continuousCreate) setTimeout(() => /** @type {HTMLInputElement|null} */ (document.querySelector('.quick-create-input'))?.focus({ preventScroll: true }), 0);
+  }
 }
 
 function flattenTree(state, categoryId, focusId = null) {
@@ -895,7 +1128,7 @@ function renderTreeList(state, category) {
         tree: true,
         interactionContext: 'tree',
       }),
-    empty: () => renderEmptyState('noItems', 'addItem', () => (/** @type {HTMLInputElement|null} */ (document.querySelector('.quick-create-input')))?.focus()),
+    empty: () => renderEmptyState('noItems', 'addItem', () => openQuickCreate({ categoryId: category.id })),
   });
   activeVirtualViewKey = virtualViewKey(state);
   activeVirtualList.setItems(rows);
@@ -903,10 +1136,9 @@ function renderTreeList(state, category) {
 }
 
 function renderSearchResults(state) {
-  const index = renderIndex(state);
-  const results = searchItems(state, ui.search, ui.tag, index);
+  const results = filteredSearchItems(state);
   const tagInput = node('input', { class: 'tag-filter-input', type: 'search', placeholder: tr('filterTag'), value: ui.tag, ariaLabel: tr('filterTag'), onInput: (event) => { ui.tag = event.target.value; scheduleRender(); } });
-  const section = node('section', { class: 'search-results' }, node('div', { class: 'section-toolbar' }, heading(tr('searchResults'), 2), tagInput, button(tr('clearFilter'), () => { ui.search = ''; ui.tag = ''; scheduleRender(); }, { className: 'text-button' })));
+  const section = node('section', { class: 'search-results' }, node('div', { class: 'section-toolbar' }, heading(tr('searchResults'), 2), tagInput, button(tr('clearFilter'), () => { ui.search = ''; ui.tag = ''; ui.searchFilter = 'all'; scheduleRender(); }, { className: 'text-button' })));
   if (!results.length) return node('div', { class: 'search-results' }, renderEmptyState('noResults', 'clearFilter', () => { ui.search = ''; scheduleRender(); }));
   const holder = node('div', { class: 'search-list-holder' });
   activeVirtualList?.destroy();
@@ -921,7 +1153,6 @@ function renderEmptyState(messageKey, actionKey = null, action = null) { return 
 function renderItemRow(state, item, { depth = 0, sourceDepth = depth, maxDepth = 2, tree = true, pathContext = false, smartView = null, siblingIndex = 0, siblingCount = 1, nextDepth = null, interactionContext = tree ? 'tree' : 'context' } = {}) {
   const index = renderIndex(state);
   const childItems = childrenOf(state, item.id, index);
-  const isParent = childItems.length > 0;
   const semantics = treeRowSemantics({ childCount: childItems.length, depth, sourceDepth, maxDepth, tree, pathContext, smartView, siblingIndex, siblingCount, nextDepth });
   const showRing = semantics.hasProgressRing;
   const progressResult = progressResultForItem(state, item.id, index.progressResultByItem, new Set(), index);
@@ -966,13 +1197,11 @@ function renderItemRow(state, item, { depth = 0, sourceDepth = depth, maxDepth =
   const info = node('div', { class: 'item-main' }, titleLine, meta);
   const chevron = iconButton('›', tr('detail'), () => openDetail(item.id), { className: 'detail-chevron' });
   chevron.dataset.gestureZone = GESTURE_ZONES.control;
-  const quickTrigger = isParent ? iconButton('⋯', tr('more'), (event) => { stop(event); if (conflict) blockConflictedEdit(); else toggleQuickActions(item.id); }, { className: 'quick-actions-trigger' }) : null;
-  if (quickTrigger) {
-    quickTrigger.dataset.gestureZone = GESTURE_ZONES.control;
-    quickTrigger.dataset.action = 'quick-actions';
-    quickTrigger.setAttribute('aria-expanded', String(ui.quickActionId === item.id));
-    quickTrigger.setAttribute('aria-controls', `quick-actions-${item.id}`);
-  }
+  const quickTrigger = iconButton('⋯', tr('more'), (event) => { stop(event); if (conflict) blockConflictedEdit(); else toggleQuickActions(item.id); }, { className: 'quick-actions-trigger' });
+  quickTrigger.dataset.gestureZone = GESTURE_ZONES.control;
+  quickTrigger.dataset.action = 'quick-actions';
+  quickTrigger.setAttribute('aria-expanded', String(ui.quickActionId === item.id));
+  quickTrigger.setAttribute('aria-controls', `quick-actions-${item.id}`);
   const endControls = node('div', { class: 'row-end-controls', 'data-gesture-zone': GESTURE_ZONES.body }, quickTrigger, chevron);
   const main = node('div', { class: `item-row-main ${showRing ? 'parent' : 'leaf'} ${semantics.isTreeRow ? 'tree-row-main' : ''}`, 'data-gesture-zone': GESTURE_ZONES.body }, handle, showRing ? ring : statusButton, info, endControls);
   const actionRow = node('div', { class: 'item-actions', 'data-gesture-zone': GESTURE_ZONES.control }, button(item.status === 'completed' ? tr('reopen') : item.status === 'skipped' ? tr('unskip') : tr('complete'), () => conflict ? blockConflictedEdit() : performStatus(item, nextStatus), { className: 'row-action', icon: item.status === 'completed' ? '↺' : '✓' }), button(tr('addChild'), () => conflict ? blockConflictedEdit() : (ui.quickActionId = item.id, ui.addChildFor = item.id, scheduleRender()), { className: 'row-action', icon: '+' }), button(state.today.items[item.id] ? tr('removeFromToday') : tr('moveToToday'), () => conflict ? blockConflictedEdit() : toggleToday(item), { className: 'row-action', icon: '◷' }), iconButton('⋯', tr('more'), (event) => { stop(event); if (conflict) blockConflictedEdit(); else openItemMenu(item); }, { className: 'row-action-more' }));
@@ -1180,20 +1409,23 @@ function reminderGroup(state, label, entries, key) {
   return group;
 }
 
-function exportCalendar() {
+async function exportCalendar() {
   const state = currentState();
   const index = createEngineIndex(state);
-  const escapeICS = (value) => String(value ?? '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
-  const utc = (value) => new Date(value).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
-  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Progress Tracker//Reminder Center//EN', 'CALSCALE:GREGORIAN'];
+  const events = [];
   for (const reminder of state.reminders) {
-    const item = getItem(state, reminder.itemId, index); const occurrence = reminderOccurrence(state, reminder, new Date(), index);
-    if (!item || !occurrence || reminder.enabled === false) continue;
-    lines.push('BEGIN:VEVENT', `UID:${reminder.id}@progress-tracker`, `DTSTAMP:${utc(new Date())}`, `DTSTART:${utc(occurrence)}`, `SUMMARY:${escapeICS(item.title)}`, `DESCRIPTION:${escapeICS(pathString(state, item.id, index))}`, 'END:VEVENT');
+    const item = getItem(state, reminder.itemId, index);
+    if (!item || reminder.enabled === false) continue;
+    const event = buildReminderCalendarEvent({ state, reminder, item, index, datasetId: state.meta?.datasetId });
+    if (event) events.push(event);
   }
-  lines.push('END:VCALENDAR');
-  downloadText(`progress-tracker-reminders-${dateKey(new Date())}.ics`, `${lines.join('\r\n')}\r\n`, 'text/calendar;charset=utf-8');
-  mutate('export_calendar', (draft) => { recordSemantic(draft, 'export', { scope: 'calendar' }); return { ok: true }; }, null, { queue: false });
+  const content = buildCalendarICS(events, { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, calendarName: tr('appName') });
+  const result = await shareCalendarFile(`progress-tracker-reminders-${dateKey(new Date())}.ics`, content);
+  if (result.cancelled) return result;
+  if (!result.ok) { toast(tr('calendarExportFailed'), 'error'); return result; }
+  await repository.update('export_calendar', (draft) => { recordSemantic(draft, 'export', { scope: 'calendar' }); return { ok: true }; }, null, { queue: false });
+  toast(tr('calendarPrepared'));
+  return result;
 }
 
 function renderReminderCard(state, entry) {
@@ -1246,6 +1478,48 @@ async function submitCustomSnooze(modal) {
 function inputField(label, input, hint = null) { return node('label', { class: 'field' }, node('span', { class: 'field-label' }, label), input, hint ? node('small', { class: 'field-hint' }, hint) : null); }
 function selectOptions(values, selected, labels = {}) { return values.map((value) => node('option', { value, selected: value === selected }, labels[value] ?? value)); }
 
+function calendarItemDate(item, due) { return item.plannedStart ? localDateInput(item.plannedStart) : due.value ? localDateInput(due.value) : ''; }
+
+function openCalendarAlert(item) {
+  ui.modal = { kind: 'calendarAlert', title: tr('calendarAlert'), itemId: item.id, alert: calendarAlertFor(item.id) };
+  scheduleRender();
+}
+
+function openCalendarSetup(item, date = '') {
+  ui.modal = { kind: 'calendarSetup', title: tr('addToDeviceCalendar'), itemId: item.id, date, time: '09:00', allDay: true, alert: calendarAlertFor(item.id) };
+  scheduleRender();
+}
+
+async function prepareItemCalendarExport(item, { date = '', time = '', allDay = true, alert = calendarAlertFor(item.id) } = {}) {
+  const state = currentState();
+  const built = buildItemCalendarEvent({ state, item, index: renderIndex(state), date, time, allDay, alert });
+  if (!built.ok) { openCalendarSetup(item, date); return built; }
+  const content = buildCalendarICS([built.event], { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
+  const result = await shareCalendarFile(calendarFilename(item.title), content);
+  if (result.cancelled) return result;
+  if (!result.ok) { toast(tr('calendarExportFailed'), 'error'); return result; }
+  saveCalendarAlert(state, item.id, alert);
+  if (ui.modal?.itemId === item.id) ui.modal = null;
+  toast(tr('calendarPrepared'));
+  return result;
+}
+
+async function submitCalendarSetup(modal) {
+  const item = getItem(currentState(), modal.itemId, renderIndex(currentState()));
+  if (!item || !modal.date) { toast(tr('calendarDateRequired'), 'error'); return; }
+  await prepareItemCalendarExport(item, { date: modal.date, time: modal.time, allDay: modal.allDay !== false, alert: modal.alert ?? 'none' });
+}
+
+function renderCalendarFields(state, item, due) {
+  const selectedDate = calendarItemDate(item, due);
+  const addAction = () => { void prepareItemCalendarExport(item, { date: selectedDate, allDay: true, alert: calendarAlertFor(item.id) }); };
+  const block = node('section', { class: 'detail-section calendar-settings' }, heading(tr('calendarAndReminders'), 3));
+  const addRow = node('div', { class: 'calendar-setting-row detail-setting-row' }, node('span', { class: 'calendar-setting-icon', ariaHidden: 'true' }, '▣'), node('div', { class: 'detail-setting-main' }, node('strong', {}, tr('addToDeviceCalendar')), node('small', {}, selectedDate ? `${tr('calendarEventDate')}: ${formatDate(language(), `${selectedDate}T12:00:00.000Z`)}` : tr('calendarNoDateHint'))), button(tr('add'), addAction, { className: 'outline-button', ariaLabel: tr('addToDeviceCalendar') }));
+  const alertRow = node('div', { class: 'calendar-setting-row detail-setting-row' }, node('span', { class: 'calendar-setting-icon', ariaHidden: 'true' }, '♧'), node('div', { class: 'detail-setting-main' }, node('strong', {}, tr('calendarAlert')), node('small', {}, tr('calendarAlertHint'))), button(calendarAlertLabel(calendarAlertFor(item.id)), () => openCalendarAlert(item), { className: 'detail-setting-value', ariaLabel: tr('calendarAlert') }));
+  block.append(addRow, alertRow, node('p', { class: 'field-hint calendar-honesty-note' }, tr('calendarImportHonesty')));
+  return block;
+}
+
 function renderDetailPanel(state, item) {
   const index = renderIndex(state);
   const due = effectiveDue(state, item.id, index);
@@ -1253,7 +1527,7 @@ function renderDetailPanel(state, item) {
   const progress = progressPresentation(progressResult);
   const lockedByConflict = itemHasConflict(state, item.id);
   const panel = node('aside', { class: 'detail-pane', role: 'dialog', 'aria-label': tr('detail') });
-  const header = node('div', { class: 'detail-header' }, node('div', { class: 'detail-heading' }, node('span', { class: 'eyebrow' }, tr('detail')), heading(item.title, 2)), iconButton('×', tr('closePanel'), () => { ui.detailId = null; scheduleRender(); }));
+  const header = node('div', { class: 'detail-header' }, node('span', { class: 'detail-grabber', ariaHidden: 'true' }), node('div', { class: 'detail-heading' }, node('span', { class: 'eyebrow' }, tr('detail')), heading(item.title, 2)), iconButton('×', tr('closePanel'), () => { ui.detailId = null; scheduleRender(); }));
   panel.append(header);
   const content = node('div', { class: 'detail-content' });
   const editable = node('div', { class: lockedByConflict ? 'conflict-edit-locked' : '' });
@@ -1266,8 +1540,8 @@ function renderDetailPanel(state, item) {
   basicGrid.append(inputField(tr('status'), node('select', { value: item.status, ariaLabel: tr('status'), onChange: (event) => { const value = event.target.value; if (value === 'completed') performStatus(item, value); else mutate('status_changed', (draft) => setItemStatus(draft, item.id, value, { force: true }), 'savedOffline'); } }, ...selectOptions(['active', 'completed', 'skipped'], item.status, { active: tr('active'), completed: tr('completed'), skipped: tr('skipped') }))));
   basicGrid.append(inputField(tr('priority'), node('select', { value: item.priority, ariaLabel: tr('priority'), onChange: (event) => mutate('priority_changed', (draft) => setPriority(draft, item.id, event.target.value), 'savedOffline') }, ...selectOptions(['none', 'low', 'medium', 'high'], item.priority, { none: tr('noPriority'), low: tr('low'), medium: tr('medium'), high: tr('high') }))));
   basicGrid.append(inputField(tr('importance'), node('select', { value: String(item.importance), ariaLabel: tr('importance'), onChange: (event) => mutate('importance_changed', (draft) => setImportance(draft, item.id, Number(event.target.value)), 'savedOffline') }, ...selectOptions(['0', '1', '2', '3'], String(item.importance), { 0: tr('unset'), 1: '★', 2: '★★', 3: '★★★' }))));
-  editable.append(progressCard, basicGrid, renderDateFields(state, item, due), renderTagsField(state, item), renderReminderFields(state, item), renderNotesField(state, item), renderChildrenField(state, item), renderHistoryField(state, item));
-  const more = node('div', { class: 'detail-more' }, heading(tr('more'), 3), button(tr('move'), () => openMoveModal(item), { className: 'secondary-button', icon: '↗' }), button(tr('duplicate'), () => openDuplicateModal(item), { className: 'secondary-button', icon: '⧉' }), button(tr('exportTree'), () => exportItemTree(item), { className: 'secondary-button', icon: '⇩' }), button(tr('delete'), () => performDelete(item), { className: 'danger-button', icon: '⌫' }));
+  editable.append(progressCard, basicGrid, renderDateFields(state, item, due), renderCalendarFields(state, item, due), renderTagsField(state, item), renderReminderFields(state, item), renderNotesField(state, item), renderChildrenField(state, item), renderHistoryField(state, item));
+  const more = node('div', { class: 'detail-more' }, heading(tr('more'), 3), node('div', { class: 'detail-more-list' }, button(tr('move'), () => openMoveModal(item), { className: 'detail-more-action', icon: '↗' }), button(tr('duplicate'), () => openDuplicateModal(item), { className: 'detail-more-action', icon: '⧉' }), button(tr('exportTree'), () => exportItemTree(item), { className: 'detail-more-action', icon: '⇩' }), button(tr('delete'), () => performDelete(item), { className: 'detail-more-action danger-button', icon: '⌫' })));
   editable.append(more);
   content.append(editable);
   panel.append(content);
@@ -1299,6 +1573,7 @@ export async function mountApp(repo) {
   ui.categoryId = state.settings.defaultCategoryId ?? state.categories[0]?.id ?? null;
   ui.page = state.meta.recoveryMode ? 'settings' : state.settings.defaultPage ?? 'categories';
   ui.smartView = state.settings.defaultSmartView ?? 'today';
+  loadCalendarPreferences(state);
   if (!state.settings.cloudSync) state.settings.cloudSync = { enabled: false, clientId: '', authorized: false, status: 'disabled', lastSyncAt: null };
   driveSync.configure(state.settings.cloudSync.clientId ?? '');
   repository.subscribe(() => scheduleRender());
@@ -1322,6 +1597,7 @@ export async function mountApp(repo) {
   }
   initialised = true;
   installGestureController();
+  installSearchPullController();
   interactionCleanup?.();
   interactionCleanup = installInteractionFeedback();
   render();
@@ -1381,7 +1657,7 @@ function renderTagsField(state, item) {
 
 function renderReminderFields(state, item) {
   const reminders = renderIndex(state).remindersByItem.get(item.id) ?? [];
-  const block = node('section', { class: 'detail-section reminder-settings' }, heading(tr('reminder'), 3), node('p', { class: 'field-hint' }, tr('reminderLimit')));
+  const block = node('section', { class: 'detail-section reminder-settings' }, heading(tr('itemReminder'), 3), node('p', { class: 'field-hint' }, tr('reminderLimit')));
   for (const reminder of reminders) block.append(renderReminderRow(state, reminder));
   if (reminders.length < 3) block.append(renderAddReminderForm(state, item));
   return block;
@@ -1494,7 +1770,7 @@ function openItemMenu(item) {
 
 function openChildCreate(parent) {
   if (itemHasConflict(currentState(), parent.id)) { blockConflictedEdit(); return; }
-  openTextPrompt(tr('addChild'), tr('itemTitle'), '', (value) => mutate('add_child', (state) => createItem(state, { categoryId: parent.categoryId, parentId: parent.id, title: value }, isoNow()), 'savedOffline'));
+  openQuickCreate({ categoryId: parent.categoryId, parentId: parent.id });
 }
 
 function openRenameItem(item) { if (itemHasConflict(currentState(), item.id)) { blockConflictedEdit(); return; } openTextPrompt(tr('rename'), tr('itemTitle'), item.title, (value) => mutate('edit_title', (state) => renameItem(state, item.id, value), 'savedOffline')); }
@@ -2352,7 +2628,10 @@ function renderModal(state) {
     tabindex: '-1',
   }, node('div', { class: 'modal-header' }, title, iconButton('×', tr('close'), closeModal)), node('div', { class: 'modal-content' }));
   const content = box.querySelector('.modal-content');
-  if (modal.kind === 'prompt') renderPromptModal(content, modal);
+  if (modal.kind === 'quickCreate') renderQuickCreateModal(content, state, modal);
+  else if (modal.kind === 'calendarSetup') renderCalendarSetupModal(content, state, modal);
+  else if (modal.kind === 'calendarAlert') renderCalendarAlertModal(content, state, modal);
+  else if (modal.kind === 'prompt') renderPromptModal(content, modal);
   else if (modal.kind === 'confirm') renderConfirmModal(content, modal);
   else if (modal.kind === 'choice' || modal.kind === 'menu' || modal.kind === 'info') renderSimpleModal(content, modal);
   else if (modal.kind === 'move') renderMoveModal(content, state, getItem(state, modal.itemId));
@@ -2367,6 +2646,46 @@ function renderModal(state) {
   else if (modal.kind === 'backupGate') renderBackupGateModal(content, modal);
   else if (modal.kind === 'customSnooze') renderCustomSnoozeModal(content, modal);
   backdrop.append(box); return backdrop;
+}
+
+function renderQuickCreateModal(content, state, modal) {
+  const parent = modal.parentId ? getItem(state, modal.parentId, renderIndex(state)) : null;
+  const submit = () => { void createFromQuickInput(state, modal.categoryId, modal.parentId ?? null); };
+  const form = node('form', { class: 'quick-create-sheet-form', onSubmit: (event) => { stop(event); submit(); } });
+  const input = node('input', {
+    class: 'quick-create-input', type: 'text', value: modal.value ?? '', placeholder: tr('quickCreatePlaceholder'),
+    ariaLabel: tr('itemTitle'), autocomplete: 'off',
+    onInput: (event) => { modal.value = event.target.value; },
+    onKeydown: (event) => { if (event.key === 'Enter' && !event.isComposing) { stop(event); submit(); } },
+  });
+  if (parent) form.append(node('p', { class: 'field-hint quick-create-context' }, `${tr('parentPath')}: ${parent.title}`));
+  form.append(input, node('label', { class: 'continuous-toggle' }, node('input', { type: 'checkbox', checked: ui.continuousCreate, onChange: (event) => { ui.continuousCreate = event.target.checked; } }), node('span', {}, tr('continuousCreate'))), node('div', { class: 'modal-actions' }, button(tr('cancel'), closeModal, { className: 'text-button' }), button(tr('addItem'), submit, { className: 'primary-button' })));
+  content.append(form);
+}
+
+function renderCalendarSetupModal(content, state, modal) {
+  const item = getItem(state, modal.itemId, renderIndex(state));
+  if (!item) return;
+  const form = node('form', { class: 'modal-form calendar-setup-form', onSubmit: (event) => { stop(event); void submitCalendarSetup(modal); } });
+  const date = node('input', { type: 'date', value: modal.date ?? '', required: true, ariaLabel: tr('calendarDate'), onInput: (event) => { modal.date = event.target.value; } });
+  const time = node('input', { type: 'time', value: modal.time ?? '09:00', disabled: modal.allDay !== false, ariaLabel: tr('calendarTime'), onInput: (event) => { modal.time = event.target.value; } });
+  const alert = node('select', { value: modal.alert ?? 'none', ariaLabel: tr('calendarAlert'), onChange: (event) => { modal.alert = event.target.value; } }, ...CALENDAR_ALERT_OPTIONS.map((option) => node('option', { value: option.value, selected: option.value === (modal.alert ?? 'none') }, calendarAlertLabel(option.value))));
+  form.append(node('p', { class: 'field-hint' }, tr('calendarDateRequired')), inputField(tr('calendarDate'), date), settingsToggle(tr('calendarAllDay'), modal.allDay !== false, (event) => { modal.allDay = event.target.checked; scheduleRender(); }), inputField(tr('calendarTime'), time), inputField(tr('calendarAlert'), alert), node('div', { class: 'modal-actions' }, button(tr('cancel'), closeModal, { className: 'text-button' }), button(tr('prepareCalendar'), () => form.requestSubmit(), { className: 'primary-button' })));
+  content.append(form);
+}
+
+function calendarAlertLabel(value) {
+  const labels = { none: tr('calendarAlertNone'), event: tr('calendarAlertAtTime'), '10m': tr('calendarAlert10m'), '30m': tr('calendarAlert30m'), '1h': tr('calendarAlert1h'), '1d': tr('calendarAlert1d') };
+  return labels[value] ?? tr('calendarAlertNone');
+}
+
+function renderCalendarAlertModal(content, state, modal) {
+  const item = getItem(state, modal.itemId, renderIndex(state));
+  if (!item) return;
+  const form = node('form', { class: 'modal-form calendar-alert-form', onSubmit: (event) => { stop(event); saveCalendarAlert(state, item.id, modal.alert ?? 'none'); ui.modal = null; scheduleRender(); } });
+  const select = node('select', { value: modal.alert ?? 'none', ariaLabel: tr('calendarAlert'), onChange: (event) => { modal.alert = event.target.value; } }, ...CALENDAR_ALERT_OPTIONS.map((option) => node('option', { value: option.value, selected: option.value === (modal.alert ?? 'none') }, calendarAlertLabel(option.value))));
+  form.append(inputField(tr('calendarAlert'), select), node('div', { class: 'modal-actions' }, button(tr('cancel'), closeModal, { className: 'text-button' }), button(tr('save'), () => form.requestSubmit(), { className: 'primary-button' })));
+  content.append(form);
 }
 
 function renderSimpleModal(content, modal) { if (modal.message) content.append(node('p', {}, modal.message)); if (modal.body) content.append(modal.body); }
