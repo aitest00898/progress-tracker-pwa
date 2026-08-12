@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  SEARCH_PULL_CONFIG, createSearchPullSession, resolveSearchPullRelease, updateSearchPullSession,
+  SEARCH_PULL_CONFIG, createSearchPullSession, resolveSearchPullRelease, shouldCaptureSearchPull, updateSearchPullSession,
 } from '../src/search-pull.js';
 
 test('top pull follows vertical distance and opens only after threshold', () => {
@@ -30,4 +30,16 @@ test('open drawer closes only after an upward close threshold', () => {
   assert.equal(resolveSearchPullRelease(result.session), 'open');
   result = updateSearchPullSession(result.session, { x: 0, y: 100 - SEARCH_PULL_CONFIG.closeThreshold });
   assert.equal(resolveSearchPullRelease(result.session), 'closed');
+});
+
+test('search delays pointer capture until a downward pull is claimed', () => {
+  const session = createSearchPullSession({ pointerId: 4, mode: 'open', startX: 100, startY: 100 });
+  const upward = updateSearchPullSession(session, { x: 100, y: 40 });
+  assert.equal(upward.claimed, false);
+  assert.equal(shouldCaptureSearchPull(session, upward), false);
+
+  const downward = updateSearchPullSession(session, { x: 100, y: 112 });
+  assert.equal(downward.claimed, true);
+  assert.equal(shouldCaptureSearchPull(session, downward), true);
+  assert.equal(shouldCaptureSearchPull(downward.session, updateSearchPullSession(downward.session, { x: 100, y: 140 })), false);
 });

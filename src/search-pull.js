@@ -84,3 +84,11 @@ export function resolveSearchPullRelease(session, config = SEARCH_PULL_CONFIG) {
   return session.mode === 'close' ? 'open' : 'closed';
 }
 
+/**
+ * Pointer capture is deliberately delayed until the pull has claimed a
+ * vertical gesture. Capturing at pointerdown prevents the browser's native
+ * scroll pipeline from receiving ordinary list swipes.
+ */
+export function shouldCaptureSearchPull(previousSession, result) {
+  return Boolean(previousSession && result && !previousSession.claimed && result.claimed && !result.cancelled);
+}

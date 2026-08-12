@@ -36,7 +36,7 @@ import {
 } from './calendar.js';
 import {
   SEARCH_DRAWER_STATES, SEARCH_PULL_CONFIG, createSearchPullSession,
-  resolveSearchPullRelease, updateSearchPullSession,
+  resolveSearchPullRelease, shouldCaptureSearchPull, updateSearchPullSession,
 } from './search-pull.js';
 
 const root = /** @type {HTMLElement} */ (document.querySelector('#app'));
@@ -709,14 +709,15 @@ function installSearchPullController() {
       origin = viewport;
     }
     const session = createSearchPullSession({ pointerId: event.pointerId, mode, startX: event.clientX, startY: event.clientY });
-    sessions.set(event.pointerId, session);
-    origin?.setPointerCapture?.(event.pointerId);
+    sessions.set(event.pointerId, { session, origin });
   };
   const onPointerMove = (event) => {
-    const previous = sessions.get(event.pointerId);
-    if (!previous) return;
+    const record = sessions.get(event.pointerId);
+    if (!record) return;
+    const previous = record.session;
     const result = updateSearchPullSession(previous, { x: event.clientX, y: event.clientY }, SEARCH_PULL_CONFIG);
-    sessions.set(event.pointerId, result.session);
+    if (shouldCaptureSearchPull(previous, result)) record.origin?.setPointerCapture?.(event.pointerId);
+    record.session = result.session;
     if (result.cancelled) return;
     if (result.claimed) {
       event.preventDefault();
@@ -726,8 +727,9 @@ function installSearchPullController() {
     }
   };
   const finish = (event) => {
-    const session = sessions.get(event.pointerId);
-    if (!session) return;
+    const record = sessions.get(event.pointerId);
+    if (!record) return;
+    const session = record.session;
     sessions.delete(event.pointerId);
     const next = resolveSearchPullRelease(session);
     ui.searchPullDistance = 0;
@@ -739,8 +741,9 @@ function installSearchPullController() {
     }
   };
   const onPointerCancel = (event) => {
-    const session = sessions.get(event.pointerId);
-    if (!session) return;
+    const record = sessions.get(event.pointerId);
+    if (!record) return;
+    const session = record.session;
     sessions.delete(event.pointerId);
     ui.searchPullDistance = 0;
     ui.searchDrawer = session.mode === 'close' ? SEARCH_DRAWER_STATES.OPEN : SEARCH_DRAWER_STATES.CLOSED;

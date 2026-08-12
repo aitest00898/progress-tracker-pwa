@@ -18,6 +18,8 @@ test('approved mobile homepage is content-first and has accessible alternate sea
   assert.match(app, /role: 'button'/);
   assert.match(app, /onKeydown: \(event\) =>/);
   assert.doesNotMatch(app, /mobile-search-affordance[\s\S]{0,260}onClick: openSearchDrawer/);
+  assert.match(app, /if \(shouldCaptureSearchPull\(previous, result\)\) record\.origin\?\.setPointerCapture/);
+  assert.doesNotMatch(app, /sessions\.set\(event\.pointerId, session\);\s*origin\?\.setPointerCapture/);
   assert.match(app, /className: 'item-detail-trigger'/);
   assert.match(app, /className: 'child-create-trigger'/);
   assert.match(app, /function createUnnamedChild\(parent\)/);
