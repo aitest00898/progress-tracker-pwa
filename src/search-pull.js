@@ -19,6 +19,15 @@ export const SEARCH_PULL_CONFIG = Object.freeze({
   closeThreshold: 56
 });
 
+/**
+ * Search pull is intentionally started only by the compact top affordance.
+ * Keeping this decision pure prevents a row's ordinary vertical scroll from
+ * being claimed by the search controller.
+ */
+export function canStartSearchPull({ isAffordance = false, scrollTop = 0, isControl = false } = {}) {
+  return Boolean(isAffordance && Number(scrollTop) <= 0 && !isControl);
+}
+
 export function createSearchPullSession({
   pointerId = 0,
   mode = 'open',

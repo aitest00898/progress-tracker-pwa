@@ -20,6 +20,8 @@ test('approved mobile homepage is content-first and has accessible alternate sea
   assert.doesNotMatch(app, /mobile-search-affordance[\s\S]{0,260}onClick: openSearchDrawer/);
   assert.match(app, /if \(shouldCaptureSearchPull\(previous, result\)\) record\.origin\?\.setPointerCapture/);
   assert.doesNotMatch(app, /sessions\.set\(event\.pointerId, session\);\s*origin\?\.setPointerCapture/);
+  assert.match(app, /const affordance = target\?\.closest\?\.\('\.mobile-search-affordance'\)/);
+  assert.match(app, /canStartSearchPull\(\{ isAffordance: Boolean\(affordance\)/);
   assert.match(app, /className: 'item-detail-trigger'/);
   assert.match(app, /className: 'child-create-trigger'/);
   assert.match(app, /function createUnnamedChild\(parent\)/);
@@ -34,7 +36,11 @@ test('approved mobile homepage is content-first and has accessible alternate sea
   assert.match(css, /\.mobile-fab \{/);
   assert.match(css, /\.mobile-search-drawer \{/);
   assert.match(css, /--mobile-search-collapsed-height: 36px/);
-  assert.match(css, /--mobile-list-floating-clearance: calc\(var\(--bottom-nav-height\)/);
+  assert.doesNotMatch(css, /--mobile-list-floating-clearance/);
+  assert.match(css, /\.mobile-search-affordance \{[\s\S]*touch-action: none;/);
+  assert.match(css, /\.category-page \.tree-list-holder,\s*\.category-page \.search-list-holder \{ height: calc\(100svh - var\(--mobile-list-top-offset\) - var\(--bottom-nav-clearance\)/);
+  assert.match(css, /\.item-main \{[\s\S]*touch-action: pan-y;/);
+  assert.match(css, /\.item-row-main \{[\s\S]*touch-action: pan-y;/);
   assert.match(css, /--row-state-column: var\(--touch-target\)/);
   assert.match(css, /\.tree-child \.item-row-main\.leaf \{ grid-template-columns: var\(--touch-target\) var\(--row-state-column\) minmax\(0, 1fr\) calc\(var\(--touch-target\) \* 2 \+ 4px\); \}/);
   assert.match(css, /\.item-title-input \{/);

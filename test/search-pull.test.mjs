@@ -1,8 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  SEARCH_PULL_CONFIG, createSearchPullSession, resolveSearchPullRelease, shouldCaptureSearchPull, updateSearchPullSession,
+  SEARCH_PULL_CONFIG, canStartSearchPull, createSearchPullSession, resolveSearchPullRelease, shouldCaptureSearchPull, updateSearchPullSession,
 } from '../src/search-pull.js';
+
+test('only the top affordance can claim search pull; row scrolling stays native', () => {
+  assert.equal(canStartSearchPull({ isAffordance: false, scrollTop: 0 }), false);
+  assert.equal(canStartSearchPull({ isAffordance: true, scrollTop: 0 }), true);
+  assert.equal(canStartSearchPull({ isAffordance: true, scrollTop: 1 }), false);
+  assert.equal(canStartSearchPull({ isAffordance: true, scrollTop: 0, isControl: true }), false);
+});
 
 test('top pull follows vertical distance and opens only after threshold', () => {
   const session = createSearchPullSession({ pointerId: 1, mode: 'open', startX: 100, startY: 0 });

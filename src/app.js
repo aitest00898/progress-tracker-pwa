@@ -35,7 +35,7 @@ import {
   calendarFilename, shareCalendarFile,
 } from './calendar.js';
 import {
-  SEARCH_DRAWER_STATES, SEARCH_PULL_CONFIG, createSearchPullSession,
+  SEARCH_DRAWER_STATES, SEARCH_PULL_CONFIG, canStartSearchPull, createSearchPullSession,
   resolveSearchPullRelease, shouldCaptureSearchPull, updateSearchPullSession,
 } from './search-pull.js';
 
@@ -689,7 +689,7 @@ function installGestureController() {
 function installSearchPullController() {
   searchPullCleanup?.();
   const sessions = new Map();
-  const viewportFor = (target) => /** @type {Element|null} */ (target)?.closest?.('.tree-list-holder .virtual-viewport, .search-list-holder .virtual-viewport');
+  const listViewport = () => /** @type {Element|null} */ (root.querySelector?.('.tree-list-holder .virtual-viewport, .search-list-holder .virtual-viewport'));
   const controlFor = (target) => /** @type {Element|null} */ (target)?.closest?.('button, input, textarea, select, a');
   const onPointerDown = (event) => {
     if (!isMobileViewport() || !event.isPrimary || ui.detailId || ui.modal || ui.page !== 'categories') return;
@@ -703,10 +703,15 @@ function installSearchPullController() {
       mode = 'close';
       origin = drawer;
     } else {
-      const viewport = viewportFor(target) ?? target?.closest?.('.mobile-search-affordance');
-      if (!viewport || (viewport.scrollTop ?? 0) > 0 || controlFor(target)) return;
+      // Keep item rows on the browser's native scroll path. Starting a search
+      // session from a row at scrollTop 0 makes the vertical drag in the
+      // blank area immediately left of the trailing ellipsis compete with
+      // list scrolling. The compact affordance is the dedicated pull zone.
+      const affordance = target?.closest?.('.mobile-search-affordance');
+      const viewport = listViewport();
+      if (!viewport || !canStartSearchPull({ isAffordance: Boolean(affordance), scrollTop: viewport.scrollTop ?? 0, isControl: Boolean(controlFor(target)) })) return;
       mode = 'open';
-      origin = viewport;
+      origin = affordance;
     }
     const session = createSearchPullSession({ pointerId: event.pointerId, mode, startX: event.clientX, startY: event.clientY });
     sessions.set(event.pointerId, { session, origin });
