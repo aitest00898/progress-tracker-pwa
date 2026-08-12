@@ -20,16 +20,16 @@ function step(session, type, x, y, time) {
   return stepGestureSession(session, { type, x, y, time });
 }
 
-test('policy assigns parent and leaf tap semantics without DOM assumptions', () => {
+test('item surfaces are inert on tap while categories retain navigation semantics', () => {
   const parent = resolveInteractionPolicy({ rowType: 'item', surface: 'tree', isParent: true });
   const leaf = resolveInteractionPolicy({ rowType: 'item', surface: 'tree', isParent: false });
   const search = resolveInteractionPolicy({ rowType: 'item', surface: 'search', isParent: true, pathContext: true });
-  assert.equal(parent.titleTap, 'toggleExpanded');
-  assert.equal(parent.bodyTap, 'toggleExpanded');
-  assert.equal(leaf.bodyTap, 'quickActions');
-  assert.equal(search.titleTap, 'focusOriginal');
-  assert.equal(search.bodyTap, 'focusOriginal');
-  assert.equal(resolveInteractionPolicy({ rowType: 'item', surface: 'detail', isParent: true }).bodyTap, 'toggleExpanded');
+  assert.equal(parent.titleTap, 'noop');
+  assert.equal(parent.bodyTap, 'noop');
+  assert.equal(leaf.bodyTap, 'noop');
+  assert.equal(search.titleTap, 'noop');
+  assert.equal(search.bodyTap, 'noop');
+  assert.equal(resolveInteractionPolicy({ rowType: 'item', surface: 'detail', isParent: true }).bodyTap, 'noop');
   assert.equal(parent.allowSwipe, true);
 });
 
@@ -78,29 +78,27 @@ test('vertical title movement and body hold never resolve as rename', () => {
   assert.equal(step(body, 'up', 0, 0, 700).effects[0].type, 'tap');
 });
 
-test('handle touch waits for long press, mouse starts drag at a small movement', () => {
+test('dedicated handle starts drag immediately for touch, pen, and mouse', () => {
   let touch = createGestureSession({ pointerId: 5, pointerType: 'touch', zone: GESTURE_ZONES.handle });
-  touch = step(touch, 'longpress', 0, 0, 650).session;
+  touch = step(touch, 'handleStart', 0, 0, 0).session;
   assert.equal(touch.state, GESTURE_STATES.dragging);
   assert.equal(touch.winner, 'drag');
   assert.equal(step(touch, 'move', 4, 35, 700).session.state, GESTURE_STATES.dragging);
   assert.equal(step(touch, 'up', 4, 35, 740).effects[0].type, 'dragEnd');
 
   let mouse = createGestureSession({ pointerId: 6, pointerType: 'mouse', zone: GESTURE_ZONES.handle });
-  mouse = step(mouse, 'move', 5, 0, 10).session;
+  mouse = step(mouse, 'handleStart', 0, 0, 0).session;
   assert.equal(mouse.state, GESTURE_STATES.dragging);
   assert.equal(step(mouse, 'up', 5, 0, 20).effects[0].type, 'dragEnd');
 
   let pen = createGestureSession({ pointerId: 61, pointerType: 'pen', zone: GESTURE_ZONES.handle });
-  pen = step(pen, 'move', 4, 0, 10).session;
-  assert.equal(pen.state, GESTURE_STATES.possible);
-  pen = step(pen, 'longpress', 4, 0, 650).session;
+  pen = step(pen, 'handleStart', 0, 0, 0).session;
   assert.equal(pen.state, GESTURE_STATES.dragging);
 });
 
-test('reorder handle remains long-press eligible at the system edge', () => {
+test('reorder handle remains directly draggable at the system edge', () => {
   let handle = createGestureSession({ pointerId: 62, pointerType: 'touch', zone: GESTURE_ZONES.handle, edgeGuarded: true });
-  handle = step(handle, 'longpress', 0, 0, 650).session;
+  handle = step(handle, 'handleStart', 0, 0, 0).session;
   assert.equal(handle.state, GESTURE_STATES.dragging);
 
   let title = createGestureSession({ pointerId: 63, pointerType: 'touch', zone: GESTURE_ZONES.title, edgeGuarded: true });

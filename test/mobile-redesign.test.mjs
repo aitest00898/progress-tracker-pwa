@@ -14,10 +14,27 @@ test('approved mobile homepage is content-first and has accessible alternate sea
   assert.match(app, /if \(!isMobileViewport\(\)\) page\.append\(header\)/);
   assert.match(app, /event\.key === '\/'/);
   assert.match(app, /if \(isMobileViewport\(\) && ui\.page === 'categories'\) openSearchDrawer\(\)/);
+  assert.match(app, /const affordance = node\('div'/);
+  assert.match(app, /role: 'button'/);
+  assert.match(app, /onKeydown: \(event\) =>/);
+  assert.doesNotMatch(app, /mobile-search-affordance[\s\S]{0,260}onClick: openSearchDrawer/);
+  assert.match(app, /className: 'item-detail-trigger'/);
+  assert.match(app, /className: 'child-create-trigger'/);
+  assert.match(app, /function createUnnamedChild\(parent\)/);
+  assert.match(app, /tapToName/);
+  assert.match(app, /startInlineRename\(item\)/);
+  assert.doesNotMatch(app, /function openItemMenu\(/);
+  assert.doesNotMatch(app, /function renderQuickActionRow\(/);
+  assert.doesNotMatch(app, /className: 'detail-chevron'/);
+  assert.doesNotMatch(app, /className: 'quick-actions-trigger'/);
   assert.match(css, /--bottom-nav-height: 74px/);
   assert.match(css, /--bottom-nav-clearance: calc\(var\(--bottom-nav-height\)/);
   assert.match(css, /\.mobile-fab \{/);
   assert.match(css, /\.mobile-search-drawer \{/);
+  assert.match(css, /--mobile-search-collapsed-height: 36px/);
+  assert.match(css, /--mobile-list-floating-clearance: calc\(var\(--bottom-nav-height\)/);
+  assert.match(css, /\.item-title-input \{/);
+  assert.match(css, /\.child-create-trigger/);
   assert.match(css, /\.topbar \{ display: none; \}/);
   assert.match(css, /\.category-page \.page-header \{ display: none; \}/);
   assert.doesNotMatch(css, /body\s*\{[^}]*touch-action\s*:\s*none/);
@@ -28,6 +45,7 @@ test('new calendar and search UI copy exists in both strict locales', () => {
     'pullToSearch', 'recentSearches', 'quickFilters', 'filterHasProgress', 'filterOverdue',
     'addToDeviceCalendar', 'calendarAlert', 'calendarAlertNone', 'calendarAlert10m',
     'calendarAlert1d', 'calendarDateRequired', 'calendarPrepared', 'calendarImportHonesty',
+    'tapToName', 'addChildToItem', 'directDrag', 'openDetail',
   ];
   for (const key of keys) {
     assert.notEqual(messages['zh-TW'][key], undefined, `missing zh-TW key ${key}`);
@@ -46,4 +64,23 @@ test('calendar integration is a read-only export path with no fake synced state'
   assert.match(calendar, /VALUE=DATE/);
   assert.match(calendar, /navigatorObject\.share/);
   assert.match(calendar, /AbortError/);
+});
+
+test('final row interaction routing keeps mutations on explicit controls', async () => {
+  const app = await readFile('src/app.js', 'utf8');
+  const gesture = await readFile('src/gesture.js', 'utf8');
+  const controller = await readFile('src/gesture-controller.js', 'utf8');
+  assert.match(app, /const detail = iconButton\('⋯', tr\('detail'/);
+  assert.match(app, /else openDetail\(item\.id\)/);
+  assert.match(app, /const addChild = iconButton\('\+', tr\('addChildToItem'/);
+  assert.match(app, /createItem\(draft, \{ categoryId: currentParent\.categoryId, parentId, title: '', allowUnnamed: true \}\)/);
+  assert.match(app, /if \(zone === GESTURE_ZONES\.title\)/);
+  assert.match(app, /onKeydown: unnamed \? \(event\) =>/);
+  assert.match(app, /onBlur: \(event\) => \{ void commitInlineRename\(item\.id, event\.target\.value\); \}/);
+  assert.match(app, /tree-expand-trigger/);
+  assert.match(app, /renderTodayField\(state, item\)/);
+  assert.match(gesture, /event\.type === 'handleStart'/);
+  assert.match(controller, /process\(record, \{ type: 'handleStart'/);
+  assert.match(app, /ui\.searchDrawer === SEARCH_DRAWER_STATES\.CLOSED/);
+  assert.doesNotMatch(app, /executeItemTapAction/);
 });

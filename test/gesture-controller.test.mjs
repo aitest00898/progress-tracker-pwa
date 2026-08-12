@@ -33,8 +33,6 @@ class FakeElement {
   matches(selector) {
     if (selector === '.item-row') return this.classList.contains('item-row');
     if (selector === '.category-nav-row') return this.classList.contains('category-nav-row');
-    if (selector === '.quick-action-row') return this.classList.contains('quick-action-row');
-    if (selector === '.quick-actions-trigger') return this.classList.contains('quick-actions-trigger');
     if (selector === 'button') return this.tagName === 'BUTTON';
     if (selector === 'input') return this.tagName === 'INPUT';
     if (selector === 'select') return this.tagName === 'SELECT';
@@ -121,7 +119,7 @@ test('delegated tap semantics cover parent title/due/blank, leaf body, and contr
   controller.dispose();
 });
 
-test('row press feedback starts on pointerdown and clears on tap, scroll, swipe, drag, and cancel', async () => {
+test('row press feedback starts on pointerdown and clears on tap, scroll, swipe, direct drag, and cancel', async () => {
   const { root, child, childBody, handle } = makeRows();
   const phases = [];
   const controller = createGestureController(root, {
@@ -147,7 +145,6 @@ test('row press feedback starts on pointerdown and clears on tap, scroll, swipe,
   pointer(root, 'pointerup', childBody, 120, 183, { pointerId: 103 });
 
   pointer(root, 'pointerdown', handle, 100, 220, { pointerId: 104 });
-  await wait(15);
   assert.equal(phases.at(-1), 'drag');
   pointer(root, 'pointercancel', handle, 100, 220, { pointerId: 104 });
   assert.equal(phases.at(-1), 'drag');
@@ -241,7 +238,7 @@ test('active, completed, and right swipes each invoke one mutation callback', ()
   controller.dispose();
 });
 
-test('drag follows raw pointer coordinates and marks the after insertion edge', async () => {
+test('drag follows raw pointer coordinates and marks the after insertion edge without a hold', () => {
   const { root, parent, child, handle } = makeRows();
   const moves = [];
   const controller = createGestureController(root, {
@@ -255,7 +252,6 @@ test('drag follows raw pointer coordinates and marks the after insertion edge', 
     },
   });
   pointer(root, 'pointerdown', handle, 100, 100, { pointerId: 70 });
-  await wait(15);
   pointer(root, 'pointermove', handle, 137, 224, { pointerId: 70 });
   assert.deepEqual(moves, [{ x: 137, y: 224 }]);
   assert.equal(parent.classList.contains('dragging'), true);
@@ -272,7 +268,7 @@ test('drag follows raw pointer coordinates and marks the after insertion edge', 
   controller.dispose();
 });
 
-test('handle drag remains delegated after source row is detached and commits once', async () => {
+test('handle drag remains delegated after source row is detached and commits once', () => {
   const { root, parent, child, handle } = makeRows();
   let starts = 0;
   let moves = 0;
@@ -286,7 +282,6 @@ test('handle drag remains delegated after source row is detached and commits onc
     onDragEnd: ({ target: value }) => { ends += 1; target = value?.id; },
   });
   pointer(root, 'pointerdown', handle, 100, 100, { pointerId: 4 });
-  await wait(15);
   root.removeChild(parent);
   pointer(root, 'pointermove', child, 100, 220, { pointerId: 4 });
   pointer(root, 'pointerup', child, 100, 220, { pointerId: 4 });
@@ -298,7 +293,7 @@ test('handle drag remains delegated after source row is detached and commits onc
   controller.dispose();
 });
 
-test('touch handle drag captures the original handle even at the system edge', async () => {
+test('touch handle drag captures the original handle immediately even at the system edge', () => {
   const previousWindow = globalThis.window;
   globalThis.window = { innerWidth: 390 };
   try {
@@ -312,11 +307,10 @@ test('touch handle drag captures the original handle even at the system edge', a
       onDragEnd: () => { ends += 1; },
     });
     pointer(root, 'pointerdown', handle, 12, 100, { pointerId: 40, pointerType: 'touch' });
-    await wait(15);
+    assert.equal(starts, 1);
     assert.equal(handle.capture.has(40), true);
     pointer(root, 'pointermove', handle, 60, 180, { pointerId: 40, pointerType: 'touch' });
     pointer(root, 'pointerup', child, 60, 180, { pointerId: 40, pointerType: 'touch' });
-    assert.equal(starts, 1);
     assert.equal(ends, 1);
     assert.equal(controller.getSessionCount(), 0);
     controller.dispose();

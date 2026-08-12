@@ -100,8 +100,11 @@ export function resolveInteractionPolicy({ rowType = 'item', surface = 'tree', i
   return Object.freeze({
     rowType: 'item',
     surface,
-    titleTap: pathContext ? 'focusOriginal' : isParent ? 'toggleExpanded' : 'quickActions',
-    bodyTap: surface === 'search' ? 'focusOriginal' : surface === 'tree' || surface === 'detail' ? (isParent ? 'toggleExpanded' : 'quickActions') : 'quickActions',
+    // Item surfaces are inert on tap. Explicit controls (progress ring,
+    // ellipsis, plus, status) own their actions; swipe and title long-press
+    // remain separate gesture channels.
+    titleTap: 'noop',
+    bodyTap: 'noop',
     allowSwipe: true,
     allowRename: true,
     allowDrag: true,
@@ -122,13 +125,12 @@ export function createGestureSession({
   policy = resolveInteractionPolicy(),
   edgeGuarded = false,
 } = {}) {
-  // The system edge gesture owns horizontal movement from the edge, but a
-  // dedicated reorder handle is still a valid long-press target there. The
-  // handle itself never claims horizontal swipe movement, so allowing the
-  // long press does not steal the system back gesture.
+  // The handle is a dedicated direct-manipulation control. It starts a drag
+  // on pointer down; only the title keeps a long-press rename affordance.
+  // The system edge guard still owns horizontal movement for row content.
   const longPressEligible = pointerType !== 'mouse'
-    && (zone === GESTURE_ZONES.title || zone === GESTURE_ZONES.handle)
-    && (zone === GESTURE_ZONES.handle || !edgeGuarded);
+    && zone === GESTURE_ZONES.title
+    && !edgeGuarded;
   return {
     state: GESTURE_STATES.possible,
     pointerId,
@@ -159,7 +161,7 @@ function moveEffect(session, event, dx, dy) {
 
 /**
  * @param {Record<string, any>} session
- * @param {{type: 'move'|'longpress'|'up'|'cancel', x?: number, y?: number, time?: number}} event
+ * @param {{type: 'move'|'handleStart'|'longpress'|'up'|'cancel', x?: number, y?: number, time?: number}} event
  * @param {Record<string, number>} [config]
  * @returns {{session: Record<string, any>, effects: Array<Record<string, any>>}}
  */
@@ -174,6 +176,16 @@ export function stepGestureSession(session, event, config = GESTURE_CONFIG) {
   next.lastX = x;
   next.lastY = y;
   next.lastTime = time;
+
+  if (event.type === 'handleStart') {
+    if (next.state === GESTURE_STATES.possible && next.zone === GESTURE_ZONES.handle && next.policy.allowDrag) {
+      next.state = GESTURE_STATES.dragging;
+      next.winner = 'drag';
+      next.suppressClick = true;
+      effects.push({ type: 'dragStart' });
+    }
+    return { session: next, effects };
+  }
 
   if (event.type === 'longpress') {
     if (next.state !== GESTURE_STATES.possible || !next.longPressPending || next.moved) return { session: next, effects };

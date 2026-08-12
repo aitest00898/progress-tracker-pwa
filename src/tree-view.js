@@ -60,12 +60,12 @@ export function treeRowClassNames(semantics) {
   ].filter(Boolean).join(' ');
 }
 
-export function treeRowMetrics(semantics, { quickActions = false, hoverActions = false } = {}) {
+export function treeRowMetrics(semantics, { hoverActions = false } = {}) {
   if (!semantics.isTreeRow) return { height: 116, gap: 8 };
   const mainHeight = semantics.depth === 0 ? 88 : semantics.hasProgressRing ? 66 : 64;
   const actionHeight = hoverActions ? 48 : 0;
   const descendantBorder = semantics.depth > 0 ? 2 : 0;
-  const height = mainHeight + actionHeight + descendantBorder + (quickActions ? 58 : 0);
+  const height = mainHeight + actionHeight + descendantBorder;
   const gap = semantics.spacing === 'tree-group' ? 28 : semantics.spacing === 'parent-child' ? 10 : 8;
   return { height, gap };
 }

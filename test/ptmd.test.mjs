@@ -15,6 +15,16 @@ test('PTMD full backup is human-readable, machine-readable, and round-trips note
   const parsed = parsePTMD(text); assert.equal(parsed.ok, true); assert.equal(parsed.backupState.items.length, 2); assert.equal(parsed.backupState.items.find((item) => item.id === root.id).tags[0], 'travel');
 });
 
+test('PTMD preserves an unnamed child placeholder as an empty canonical title', () => {
+  const state = makeEmptyState(at);
+  const categoryId = state.categories[0].id;
+  const root = createItem(state, { categoryId, title: 'Plan' }, at).item;
+  createItem(state, { categoryId, parentId: root.id, title: '', allowUnnamed: true }, at);
+  const parsed = parsePTMD(exportPTMD(state, { scope: 'full', exportedAt: at, timezone: 'Asia/Taipei' }));
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.backupState.items.some((item) => item.title === '' && item.parentId === root.id), true);
+});
+
 test('PTMD import is add-only, skips same IDs, isolates unsafe hierarchy, and disables imported reminders', () => {
   const state = makeEmptyState(at); const root = createItem(state, { categoryId: state.categories[0].id, title: 'Existing' }, at).item;
   const incoming = makeEmptyState(at); const newRoot = createItem(incoming, { categoryId: incoming.categories[0].id, title: 'Imported' }, at).item;

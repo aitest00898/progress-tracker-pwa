@@ -304,7 +304,9 @@ export function createGestureController(root, options = {}) {
     sessions.set(session.pointerId, record);
     activePointerId = session.pointerId;
     options.onPressVisual?.({ row, phase: 'start', zone, session });
-    if (session.longPressPending) {
+    if (zone === GESTURE_ZONES.handle && session.policy.allowDrag) {
+      process(record, { type: 'handleStart', time: now() }, event);
+    } else if (session.longPressPending) {
       record.timer = setTimeout(() => {
         if (!sessions.has(session.pointerId)) return;
         process(record, { type: 'longpress', time: now() }, null);

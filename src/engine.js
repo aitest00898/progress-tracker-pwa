@@ -160,10 +160,10 @@ export function reorderCategories(state, categoryId, beforeCategoryId, at = isoN
   return { ok: true };
 }
 
-/** @param {AppState} state @param {{categoryId:string, parentId?:string|null, title:string}} input @param {string} [at] */
-export function createItem(state, { categoryId, parentId = null, title }, at = isoNow()) {
+/** @param {AppState} state @param {{categoryId:string, parentId?:string|null, title:string, allowUnnamed?:boolean}} input @param {string} [at] */
+export function createItem(state, { categoryId, parentId = null, title, allowUnnamed = false }, at = isoNow()) {
   const cleanTitle = String(title ?? '').trim();
-  if (!cleanTitle) return { ok: false, reason: 'required' };
+  if (!cleanTitle && !allowUnnamed) return { ok: false, reason: 'required' };
   if (!getCategory(state, categoryId)) return { ok: false, reason: 'invalid_category' };
   if (parentId) {
     const parent = getItem(state, parentId);

@@ -53,6 +53,7 @@ let initialised = false;
 const driveSync = new GoogleDriveSync();
 let syncTimer = null;
 let syncInFlight = false;
+let unnamedChildCreationQueue = Promise.resolve();
 let interactionCleanup = null;
 let modalFocusOwner = null;
 let modalReturnFocus = null;
@@ -63,7 +64,7 @@ let viewportResizeTimer = null;
 /** @type {Record<string, any>} */
 const ui = {
   page: 'categories', categoryId: null, smartView: 'today', settingsPage: 'general', detailId: null,
-  search: '', tag: '', quickActionId: null, addChildFor: null, expanded: new Set(), focusRoot: null, notesTab: 'edit',
+  search: '', tag: '', inlineRenameId: null, inlineRenameValue: '', expanded: new Set(), focusRoot: null, notesTab: 'edit',
   modal: null, toast: null, importPreview: null, restorePreview: null, contextItemId: null, continuousCreate: true,
   dragItemId: null, dragCategoryId: null, selectedDeleted: new Set(), moveItemId: null, duplicateItemId: null,
   dragTargetId: null, dragTargetPosition: null,
@@ -418,7 +419,6 @@ async function mutate(label, mutator, successKey = null, options = {}) {
 function localDateInput(iso) { return iso ? new Date(iso).toISOString().slice(0, 10) : ''; }
 function dateFromInput(value) { return value ? new Date(`${value}T12:00:00`).toISOString() : null; }
 function priorityColor(priority) { return { none: 'var(--border-subtle)', low: 'var(--priority-low)', medium: 'var(--priority-medium)', high: 'var(--priority-high)' }[priority] ?? 'var(--border-subtle)'; }
-function priorityLabel(priority) { return tr(priority === 'none' ? 'noPriority' : priority); }
 function fieldLabel(field) { return tr({ title: 'itemTitle', status: 'status', categoryId: 'categoryName', parentId: 'selectParent', activeOrder: 'itemOrderSaved', completedOrder: 'itemOrderSaved', priority: 'priority', importance: 'importance', plannedStart: 'plannedStart', dueMode: 'dueDate', dueDate: 'dueDate', notes: 'notes', tags: 'tags' }[field] ?? 'syncConflict'); }
 function itemHasConflict(state, itemId) { return state.conflicts.some((conflict) => conflict.itemId === itemId); }
 function blockConflictedEdit() { openInfoModal(tr('conflictEditBlocked')); }
@@ -450,8 +450,8 @@ function clearTransientInteractionState({ preserveSelection = false } = {}) {
   gestureController?.cancelAll();
   ui.searchDrawer = SEARCH_DRAWER_STATES.CLOSED;
   ui.searchPullDistance = 0;
-  ui.quickActionId = null;
-  ui.addChildFor = null;
+  ui.inlineRenameId = null;
+  ui.inlineRenameValue = '';
   ui.dragItemId = null;
   ui.dragCategoryId = null;
   ui.dragTargetId = null;
@@ -473,23 +473,17 @@ function rowPolicy(row, zone, event) {
 function rowItem(row) { return row?.dataset.itemId ? getItem(currentState(), row.dataset.itemId, renderIndex(currentState())) : null; }
 function rowCategory(row) { return row?.dataset.categoryId ? getCategory(currentState(), row.dataset.categoryId, renderIndex(currentState())) : null; }
 
-function executeItemTapAction(item, action) {
-  if (action === 'focusOriginal') { focusItem(item); return; }
-  if (action === 'toggleExpanded') { toggleExpanded(item); return; }
-  if (action === 'quickActions') toggleQuickActions(item.id);
-}
-
 function executeRowTapPolicy(row, zone) {
   const category = rowCategory(row);
   if (category) { setPage('categories', category.id); return; }
-  const item = rowItem(row);
-  if (!item) return;
-  const policy = rowPolicy(row, zone, null);
-  executeItemTapAction(item, zone === GESTURE_ZONES.title ? policy.titleTap : policy.bodyTap);
 }
 
 function handleGestureTap({ row, zone }) {
   executeRowTapPolicy(row, zone);
+  if (zone === GESTURE_ZONES.title) {
+    const item = rowItem(row);
+    if (item && !String(item.title ?? '').trim()) startInlineRename(item);
+  }
 }
 
 function handleGestureRename({ row }) {
@@ -498,7 +492,7 @@ function handleGestureRename({ row }) {
   const item = rowItem(row);
   if (item) {
     if (itemHasConflict(currentState(), item.id)) blockConflictedEdit();
-    else openRenameItem(item);
+    else startInlineRename(item);
   }
 }
 
@@ -654,11 +648,6 @@ function installGestureController() {
   gestureController = createGestureController(root, {
     getPolicy: ({ row, zone, event }) => rowPolicy(row, zone, event),
     getRowKey: (row) => row.dataset.itemId ? `item:${row.dataset.itemId}` : row.dataset.categoryId ? `category:${row.dataset.categoryId}` : null,
-    onOutsidePointerDown: ({ event }) => {
-      if (!ui.quickActionId) return;
-      const insideQuick = (/** @type {Element|null} */ (event.target))?.closest?.('.quick-action-row, .quick-actions-trigger');
-      if (!insideQuick) { ui.quickActionId = null; ui.addChildFor = null; scheduleRender(); }
-    },
     onPressVisual: ({ row, phase }) => {
       if (phase === 'start') row.classList.add(INTERACTION_CLASSES.rowPressed);
       else if (isRowPressCancellation(phase) || phase === 'end') row.classList.remove(INTERACTION_CLASSES.rowPressed);
@@ -701,7 +690,7 @@ function installSearchPullController() {
   searchPullCleanup?.();
   const sessions = new Map();
   const viewportFor = (target) => /** @type {Element|null} */ (target)?.closest?.('.tree-list-holder .virtual-viewport, .search-list-holder .virtual-viewport');
-  const controlFor = (target) => /** @type {Element|null} */ (target)?.closest?.('button, input, textarea, select, a, .item-row');
+  const controlFor = (target) => /** @type {Element|null} */ (target)?.closest?.('button, input, textarea, select, a');
   const onPointerDown = (event) => {
     if (!isMobileViewport() || !event.isPrimary || ui.detailId || ui.modal || ui.page !== 'categories') return;
     const target = /** @type {Element|null} */ (event.target);
@@ -714,8 +703,8 @@ function installSearchPullController() {
       mode = 'close';
       origin = drawer;
     } else {
-      const viewport = viewportFor(target);
-      if (!viewport || viewport.scrollTop > 0 || controlFor(target)) return;
+      const viewport = viewportFor(target) ?? target?.closest?.('.mobile-search-affordance');
+      if (!viewport || (viewport.scrollTop ?? 0) > 0 || controlFor(target)) return;
       mode = 'open';
       origin = viewport;
     }
@@ -774,7 +763,7 @@ function installSearchPullController() {
 function handleKeyboardShortcuts(event) {
   if (event.key === 'Escape') {
     if (ui.modal) { closeModal(); return; }
-    if (ui.quickActionId || ui.addChildFor) { clearTransientInteractionState({ preserveSelection: true }); scheduleRender(); return; }
+    if (ui.inlineRenameId) { cancelInlineRename(); return; }
     if (ui.detailId) { ui.detailId = null; scheduleRender(); }
     return;
   }
@@ -815,20 +804,6 @@ function openDetail(itemId) {
   ui.contextItemId = null;
   mutate('detail_opened', (state) => { recordSemantic(state, 'detail_opened', { page: 'detail' }); return { ok: true }; }, null, { queue: false });
   scheduleRender();
-}
-
-function focusItem(item) {
-  ui.page = 'categories'; ui.categoryId = item.categoryId; ui.focusRoot = item.id; ui.search = ''; ui.searchDrawer = SEARCH_DRAWER_STATES.CLOSED; ui.searchFilter = 'all'; ui.highlightId = item.id;
-  mutate('search_focus', (draft) => {
-    const expanded = new Set(draft.settings.expandedByCategory[item.categoryId] ?? []);
-    for (const ancestor of itemPath(draft, item.id)) expanded.add(ancestor.id);
-    draft.settings.expandedByCategory[item.categoryId] = [...expanded];
-    draft.settings.focusByCategory[item.categoryId] = item.id;
-    recordSemantic(draft, 'search', { result: 'focus' });
-    return { ok: true };
-  }, null, { queue: false });
-  scheduleRender();
-  setTimeout(() => { if (ui.highlightId === item.id) { ui.highlightId = null; scheduleRender(); } }, 1700);
 }
 
 function render() {
@@ -878,7 +853,7 @@ function renderShell(state) {
   body.append(main);
   shell.append(body);
   if (!recoveryMode) shell.append(renderMobileNav(state));
-  if (!recoveryMode && !ui.detailId && !ui.modal) shell.append(renderMobileFab(state));
+  if (!recoveryMode && !ui.detailId && !ui.modal && ui.searchDrawer === SEARCH_DRAWER_STATES.CLOSED) shell.append(renderMobileFab(state));
   const detailItem = !recoveryMode && ui.detailId ? getItem(state, ui.detailId, index) : null;
   if (detailItem) shell.append(renderDetailPanel(state, detailItem));
   if (ui.modal) shell.append(renderModal(state));
@@ -977,12 +952,15 @@ function renderCategoryPage(state) {
 
 function renderMobileSearchAffordance(state) {
   const drawerOpen = [SEARCH_DRAWER_STATES.OPEN, SEARCH_DRAWER_STATES.PULLING, SEARCH_DRAWER_STATES.CLOSING].includes(ui.searchDrawer);
-  const affordance = node('button', {
-    type: 'button',
+  const affordance = node('div', {
     class: `mobile-search-affordance ${ui.searchDrawer === SEARCH_DRAWER_STATES.PULLING ? 'is-pulling' : ''}`,
     style: { '--search-pull-distance': `${ui.searchPullDistance}px` },
     ariaLabel: tr('pullToSearch'),
-    onClick: openSearchDrawer,
+    role: 'button',
+    tabIndex: '0',
+    onKeydown: (event) => {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openSearchDrawer(); }
+    },
   }, node('span', { class: 'mobile-search-grabber', ariaHidden: 'true' }), icon('⌕', tr('search')), node('span', {}, tr('pullToSearch')));
   if (!drawerOpen) return node('div', { class: 'mobile-search-surface' }, affordance);
 
@@ -1050,6 +1028,73 @@ async function createFromQuickInput(state, categoryId, parentId = null) {
   }
 }
 
+function focusInlineRename(itemId) {
+  const input = /** @type {HTMLInputElement|null} */ (Array.from(root?.querySelectorAll?.('.item-title-input') ?? [])
+    .find((candidate) => /** @type {HTMLElement|null} */ (candidate.closest('.item-row'))?.dataset.itemId === itemId) ?? null);
+  if (!input) return;
+  input.focus({ preventScroll: true });
+  input.select?.();
+}
+
+function startInlineRename(item) {
+  const current = getItem(currentState(), item.id, renderIndex(currentState()));
+  if (!current || itemHasConflict(currentState(), current.id)) return;
+  ui.inlineRenameId = current.id;
+  ui.inlineRenameValue = String(current.title ?? '');
+  scheduleRender();
+  setTimeout(() => focusInlineRename(current.id), 0);
+}
+
+function cancelInlineRename() {
+  if (!ui.inlineRenameId) return;
+  ui.inlineRenameId = null;
+  ui.inlineRenameValue = '';
+  scheduleRender();
+}
+
+async function commitInlineRename(itemId, value) {
+  if (ui.inlineRenameId !== itemId) return;
+  const cleanTitle = String(value ?? '').trim();
+  const current = getItem(currentState(), itemId, renderIndex(currentState()));
+  if (!current) { cancelInlineRename(); return; }
+  if (!cleanTitle) {
+    // An unnamed child remains a valid, persistent placeholder. A named item
+    // keeps its previous title instead of silently becoming invalid.
+    cancelInlineRename();
+    return;
+  }
+  ui.inlineRenameId = null;
+  ui.inlineRenameValue = '';
+  const result = await mutate('edit_title', (draft) => renameItem(draft, itemId, cleanTitle), 'savedOffline');
+  if (!result.ok) {
+    ui.inlineRenameId = itemId;
+    ui.inlineRenameValue = current.title ?? '';
+    scheduleRender();
+  }
+}
+
+async function createUnnamedChild(parent) {
+  const parentId = parent?.id;
+  if (!parentId || itemHasConflict(currentState(), parentId) || currentState().meta.recoveryMode) return;
+  unnamedChildCreationQueue = unnamedChildCreationQueue.then(async () => {
+    const state = currentState();
+    const currentParent = getItem(state, parentId, renderIndex(state));
+    if (!currentParent) return;
+    const result = await mutate('add_unnamed_child', (draft) => {
+      const created = createItem(draft, { categoryId: currentParent.categoryId, parentId, title: '', allowUnnamed: true });
+      if (!created.ok) return created;
+      const expanded = new Set(draft.settings.expandedByCategory[currentParent.categoryId] ?? []);
+      expanded.add(parentId);
+      draft.settings.expandedByCategory[currentParent.categoryId] = [...expanded];
+      recordSemantic(draft, 'add_child', { unnamed: true });
+      return created;
+    }, null);
+    if (result.ok) ui.highlightId = result.result?.item?.id ?? null;
+    scheduleRender();
+  }).catch(() => { /* repository mutation reports durable failures */ });
+  return unnamedChildCreationQueue;
+}
+
 function flattenTree(state, categoryId, focusId = null) {
   const index = renderIndex(state);
   const focus = focusId ? getItem(state, focusId, index) : null;
@@ -1112,7 +1157,7 @@ function renderTreeList(state, category) {
     const depth = entry.depth;
     const nextDepth = entry.nextDepth === null ? null : Math.min(entry.nextDepth, maxDepth);
     const semantics = treeRowSemantics({ childCount: childrenOf(state, entry.item.id, index).length, depth, sourceDepth: entry.depth, maxDepth, tree: true, siblingIndex: entry.siblingIndex, siblingCount: entry.siblingCount, nextDepth });
-    return treeRowMetrics(semantics, { quickActions: ui.quickActionId === entry.item.id, hoverActions: window.innerWidth > 700 });
+    return treeRowMetrics(semantics, { hoverActions: window.innerWidth > 700 });
   };
   activeVirtualList?.destroy();
   activeVirtualList = new VirtualList(holder, {
@@ -1167,7 +1212,7 @@ function renderItemRow(state, item, { depth = 0, sourceDepth = depth, maxDepth =
   const conflict = index.conflictsByItem.has(item.id);
   const reminders = index.remindersByItem.get(item.id) ?? [];
   const row = node('article', {
-    class: `item-row priority-${item.priority} ${treeRowClassNames(semantics)} ${item.status === 'completed' ? 'is-completed' : ''} ${ui.quickActionId === item.id ? 'quick-open' : ''} ${ui.highlightId === item.id ? 'item-highlight' : ''}`,
+    class: `item-row priority-${item.priority} ${treeRowClassNames(semantics)} ${item.status === 'completed' ? 'is-completed' : ''} ${ui.highlightId === item.id ? 'item-highlight' : ''}`,
     style: { '--priority-color': priorityColor(item.priority), '--depth': String(semantics.depth) },
     dataset: {
       itemId: item.id,
@@ -1184,44 +1229,57 @@ function renderItemRow(state, item, { depth = 0, sourceDepth = depth, maxDepth =
       nextDepth: semantics.nextDepth === null ? '' : String(semantics.nextDepth),
       treeSpacing: semantics.spacing,
     },
-    onContextmenu: (event) => { stop(event); if (conflict) blockConflictedEdit(); else openItemMenu(item); },
   });
-  const handle = node('button', { class: 'drag-handle', type: 'button', 'data-gesture-zone': GESTURE_ZONES.handle, ariaLabel: tr('longPressDrag'), title: tr('longPressDrag') }, '⠿');
+  const handle = node('button', { class: 'drag-handle', type: 'button', 'data-gesture-zone': GESTURE_ZONES.handle, ariaLabel: tr('directDrag'), title: tr('directDrag') }, '⠿');
   const nextStatus = item.status === 'completed' ? 'active' : item.status === 'skipped' ? 'active' : 'completed';
   const statusButton = button(item.status === 'completed' ? '✓' : item.status === 'skipped' ? '–' : '○', () => conflict ? blockConflictedEdit() : performStatus(item, nextStatus), { className: `status-button ${item.status}`, ariaLabel: item.status === 'completed' ? tr('reopen') : item.status === 'skipped' ? tr('unskip') : tr('complete'), title: item.status === 'completed' ? tr('reopen') : item.status === 'skipped' ? tr('unskip') : tr('complete') });
   statusButton.dataset.gestureZone = GESTURE_ZONES.control;
-  const ring = node('span', { class: 'progress-ring', style: { '--progress': `${progress.numeric}%` }, ariaLabel: tr('progressPercent', { value: progress.numeric }) }, node('span', {}, progress.label));
-  const titlePolicy = resolveInteractionPolicy({ rowType: 'item', surface: interactionContext, isParent: semantics.isParent, pathContext });
-  const title = node('button', { type: 'button', class: 'item-title', 'data-gesture-zone': GESTURE_ZONES.title, onClick: (event) => { if (isKeyboardActivation(event)) executeItemTapAction(item, titlePolicy.titleTap); } }, item.title);
+  const ring = node(semantics.isTreeRow && semantics.isParent ? 'button' : 'span', {
+    class: `progress-ring ${semantics.isTreeRow && semantics.isParent ? 'tree-expand-trigger' : ''}`,
+    style: { '--progress': `${progress.numeric}%` },
+    ariaLabel: tr('progressPercent', { value: progress.numeric }),
+    'aria-expanded': semantics.isTreeRow && semantics.isParent ? String((state.settings.expandedByCategory[item.categoryId] ?? []).includes(item.id)) : undefined,
+    title: semantics.isTreeRow && semantics.isParent ? tr((state.settings.expandedByCategory[item.categoryId] ?? []).includes(item.id) ? 'collapse' : 'expand') : undefined,
+    onClick: semantics.isTreeRow && semantics.isParent ? (event) => { stop(event); toggleExpanded(item); } : undefined,
+  }, node('span', {}, progress.label));
+  const unnamed = !String(item.title ?? '').trim();
+  const title = ui.inlineRenameId === item.id
+    ? node('input', {
+      class: 'item-title-input', type: 'text', value: ui.inlineRenameValue,
+      'data-gesture-zone': GESTURE_ZONES.control,
+      ariaLabel: tr('itemTitle'), placeholder: tr('tapToName'),
+      onInput: (event) => { ui.inlineRenameValue = event.target.value; },
+      onKeydown: (event) => {
+        if (event.key === 'Enter') { stop(event); void commitInlineRename(item.id, event.target.value); }
+        else if (event.key === 'Escape') { stop(event); cancelInlineRename(); }
+      },
+      onBlur: (event) => { void commitInlineRename(item.id, event.target.value); },
+    })
+    : node('button', {
+      type: 'button', class: `item-title ${unnamed ? 'item-title-placeholder' : ''}`,
+      'data-gesture-zone': GESTURE_ZONES.title,
+      ariaLabel: unnamed ? tr('tapToName') : item.title,
+      onKeydown: unnamed ? (event) => {
+        if (event.key === 'Enter' || event.key === ' ') { stop(event); startInlineRename(item); }
+      } : undefined,
+    }, unnamed ? tr('tapToName') : item.title);
   const titleLine = node('div', { class: 'item-title-line' }, title, item.importance ? node('span', { class: 'importance-stars', title: tr('importance') }, '★'.repeat(item.importance)) : null, reminders.length ? node('span', { class: 'reminder-symbol', title: tr('reminder'), ariaLabel: tr('reminder') }, '⌁') : null, conflict ? node('span', { class: 'conflict-indicator', title: tr('syncConflict'), ariaLabel: tr('syncConflict') }, '⚠') : null);
   const path = pathContext ? node('span', { class: 'item-path-context' }, pathString(state, item.id, index)) : null;
   const meta = node('div', { class: `item-meta ${pathContext ? 'with-path' : ''}` }, node('span', { class: `due-text ${overdue ? 'overdue' : isToday ? 'today' : ''}`, title: due.source === 'inherited' ? tr('inherited') : due.source === 'explicit' ? tr('explicit') : tr('noDeadline') }, dueText), item.tags.length ? node('span', { class: 'tag-count' }, `#${item.tags.length}`) : null, path);
   const info = node('div', { class: 'item-main' }, titleLine, meta);
-  const chevron = iconButton('›', tr('detail'), () => openDetail(item.id), { className: 'detail-chevron' });
-  chevron.dataset.gestureZone = GESTURE_ZONES.control;
-  const quickTrigger = iconButton('⋯', tr('more'), (event) => { stop(event); if (conflict) blockConflictedEdit(); else toggleQuickActions(item.id); }, { className: 'quick-actions-trigger' });
-  quickTrigger.dataset.gestureZone = GESTURE_ZONES.control;
-  quickTrigger.dataset.action = 'quick-actions';
-  quickTrigger.setAttribute('aria-expanded', String(ui.quickActionId === item.id));
-  quickTrigger.setAttribute('aria-controls', `quick-actions-${item.id}`);
-  const endControls = node('div', { class: 'row-end-controls', 'data-gesture-zone': GESTURE_ZONES.body }, quickTrigger, chevron);
+  const detail = iconButton('⋯', tr('detail'), (event) => { stop(event); if (conflict) blockConflictedEdit(); else openDetail(item.id); }, { className: 'item-detail-trigger' });
+  detail.dataset.gestureZone = GESTURE_ZONES.control;
+  detail.dataset.action = 'detail';
+  const addChild = iconButton('+', tr('addChildToItem', { title: unnamed ? tr('tapToName') : item.title }), (event) => { stop(event); if (conflict) blockConflictedEdit(); else void createUnnamedChild(item); }, { className: 'child-create-trigger' });
+  addChild.dataset.gestureZone = GESTURE_ZONES.control;
+  addChild.dataset.action = 'add-child';
+  const endControls = node('div', { class: 'row-end-controls', 'data-gesture-zone': GESTURE_ZONES.body }, detail, addChild);
   const main = node('div', { class: `item-row-main ${showRing ? 'parent' : 'leaf'} ${semantics.isTreeRow ? 'tree-row-main' : ''}`, 'data-gesture-zone': GESTURE_ZONES.body }, handle, showRing ? ring : statusButton, info, endControls);
-  const actionRow = node('div', { class: 'item-actions', 'data-gesture-zone': GESTURE_ZONES.control }, button(item.status === 'completed' ? tr('reopen') : item.status === 'skipped' ? tr('unskip') : tr('complete'), () => conflict ? blockConflictedEdit() : performStatus(item, nextStatus), { className: 'row-action', icon: item.status === 'completed' ? '↺' : '✓' }), button(tr('addChild'), () => conflict ? blockConflictedEdit() : (ui.quickActionId = item.id, ui.addChildFor = item.id, scheduleRender()), { className: 'row-action', icon: '+' }), button(state.today.items[item.id] ? tr('removeFromToday') : tr('moveToToday'), () => conflict ? blockConflictedEdit() : toggleToday(item), { className: 'row-action', icon: '◷' }), iconButton('⋯', tr('more'), (event) => { stop(event); if (conflict) blockConflictedEdit(); else openItemMenu(item); }, { className: 'row-action-more' }));
   const insertionIndicator = node('div', { class: 'drag-insertion-indicator', ariaHidden: 'true' });
   const swipeBackground = node('div', { class: 'swipe-action-background', 'aria-hidden': 'true' }, node('span', { class: 'swipe-action-left' }, item.status === 'completed' ? tr('reopen') : tr('complete')), node('span', { class: 'swipe-action-right' }, tr('delete')));
-  row.append(swipeBackground, main, actionRow, insertionIndicator);
-  if (ui.quickActionId === item.id) row.append(renderQuickActionRow(state, item));
+  row.append(swipeBackground, main, insertionIndicator);
+  if (ui.inlineRenameId === item.id) setTimeout(() => focusInlineRename(item.id), 0);
   return row;
-}
-
-function renderQuickActionRow(state, item) {
-  const row = node('div', { class: 'quick-action-row', id: `quick-actions-${item.id}`, role: 'group', 'aria-label': tr('more'), 'data-gesture-zone': GESTURE_ZONES.control }, node('span', { class: 'quick-action-label' }, tr('more')), button(tr('addChild'), () => itemHasConflict(state, item.id) ? blockConflictedEdit() : openChildCreate(item), { className: 'quick-action-button' }), button(state.today.items[item.id] ? tr('removeFromToday') : tr('moveToToday'), () => itemHasConflict(state, item.id) ? blockConflictedEdit() : toggleToday(item), { className: 'quick-action-button' }), node('label', { class: 'quick-priority' }, tr('priority'), node('select', { value: item.priority, ariaLabel: tr('priority'), onChange: (event) => itemHasConflict(currentState(), item.id) ? blockConflictedEdit() : mutate('priority_changed', (draft) => setPriority(draft, item.id, event.target.value) , 'priorityChanged') }, ...['none', 'low', 'medium', 'high'].map((value) => node('option', { value }, priorityLabel(value))))), button(tr('close'), () => { ui.quickActionId = null; ui.addChildFor = null; scheduleRender(); }, { className: 'quick-action-button' }));
-  return row;
-}
-
-function toggleQuickActions(itemId) {
-  ui.quickActionId = ui.quickActionId === itemId ? null : itemId;
-  scheduleRender();
 }
 
 function toggleExpanded(item) {
@@ -1276,6 +1334,11 @@ function toggleToday(item) {
   if (itemHasConflict(currentState(), item.id)) { blockConflictedEdit(); return; }
   if (currentState().today.items[item.id]) mutate('remove_today', (state) => removeFromToday(state, item.id), 'todayRemoved');
   else mutate('add_today', (state) => addToToday(state, item.id), 'todayAdded');
+}
+
+function renderTodayField(state, item) {
+  const isToday = Boolean(state.today.items[item.id]);
+  return node('section', { class: 'detail-section detail-today-setting' }, node('div', { class: 'detail-setting-row' }, node('div', { class: 'detail-setting-main' }, node('strong', {}, isToday ? tr('removeFromToday') : tr('moveToToday')), node('small', {}, tr('todayEmptyHint'))), button(isToday ? tr('removeFromToday') : tr('moveToToday'), () => toggleToday(item), { className: 'outline-button' })));
 }
 
 function renderTodayPage(state) {
@@ -1542,7 +1605,7 @@ function renderDetailPanel(state, item) {
   basicGrid.append(inputField(tr('status'), node('select', { value: item.status, ariaLabel: tr('status'), onChange: (event) => { const value = event.target.value; if (value === 'completed') performStatus(item, value); else mutate('status_changed', (draft) => setItemStatus(draft, item.id, value, { force: true }), 'savedOffline'); } }, ...selectOptions(['active', 'completed', 'skipped'], item.status, { active: tr('active'), completed: tr('completed'), skipped: tr('skipped') }))));
   basicGrid.append(inputField(tr('priority'), node('select', { value: item.priority, ariaLabel: tr('priority'), onChange: (event) => mutate('priority_changed', (draft) => setPriority(draft, item.id, event.target.value), 'savedOffline') }, ...selectOptions(['none', 'low', 'medium', 'high'], item.priority, { none: tr('noPriority'), low: tr('low'), medium: tr('medium'), high: tr('high') }))));
   basicGrid.append(inputField(tr('importance'), node('select', { value: String(item.importance), ariaLabel: tr('importance'), onChange: (event) => mutate('importance_changed', (draft) => setImportance(draft, item.id, Number(event.target.value)), 'savedOffline') }, ...selectOptions(['0', '1', '2', '3'], String(item.importance), { 0: tr('unset'), 1: '★', 2: '★★', 3: '★★★' }))));
-  editable.append(progressCard, basicGrid, renderDateFields(state, item, due), renderCalendarFields(state, item, due), renderTagsField(state, item), renderReminderFields(state, item), renderNotesField(state, item), renderChildrenField(state, item), renderHistoryField(state, item));
+  editable.append(progressCard, basicGrid, renderDateFields(state, item, due), renderCalendarFields(state, item, due), renderTodayField(state, item), renderTagsField(state, item), renderReminderFields(state, item), renderNotesField(state, item), renderChildrenField(state, item), renderHistoryField(state, item));
   const more = node('div', { class: 'detail-more' }, heading(tr('more'), 3), node('div', { class: 'detail-more-list' }, button(tr('move'), () => openMoveModal(item), { className: 'detail-more-action', icon: '↗' }), button(tr('duplicate'), () => openDuplicateModal(item), { className: 'detail-more-action', icon: '⧉' }), button(tr('exportTree'), () => exportItemTree(item), { className: 'detail-more-action', icon: '⇩' }), button(tr('delete'), () => performDelete(item), { className: 'detail-more-action danger-button', icon: '⌫' })));
   editable.append(more);
   content.append(editable);
@@ -1697,7 +1760,7 @@ function renderNotesField(state, item) {
 
 function renderChildrenField(state, item) {
   const children = [...childrenOf(state, item.id, renderIndex(state))].sort((a, b) => Number(a.status === 'completed') - Number(b.status === 'completed') || Number(a.activeOrder) - Number(b.activeOrder));
-  const section = node('section', { class: 'detail-section children-section' }, node('div', { class: 'section-toolbar' }, heading(tr('children'), 3), button(tr('addChild'), () => openChildCreate(item), { className: 'text-button', icon: '+' })));
+  const section = node('section', { class: 'detail-section children-section' }, node('div', { class: 'section-toolbar' }, heading(tr('children'), 3), button(tr('addChild'), () => void createUnnamedChild(item), { className: 'text-button', icon: '+' })));
   if (!children.length) section.append(node('p', { class: 'muted' }, tr('noItems')));
   else children.forEach((child, childIndex) => section.append(renderItemRow(state, child, {
     depth: 1,
@@ -1767,19 +1830,6 @@ function openAncestorMenu(state, focus) {
   const ancestors = itemPath(state, focus.id).slice(0, -1);
   openChoiceModal(tr('showAncestors'), tr('path'), ancestors.map((item) => ({ label: item.title, action: () => setFocus(focus.categoryId, item.id) })));
 }
-
-function openItemMenu(item) {
-  if (itemHasConflict(currentState(), item.id)) { blockConflictedEdit(); return; }
-  ui.modal = { kind: 'menu', title: item.title, body: node('div', { class: 'modal-actions vertical' }, button(tr('addChild'), () => { ui.modal = null; openChildCreate(item); }, { className: 'secondary-button', icon: '+' }), button(item.status === 'completed' ? tr('reopen') : tr('complete'), () => { ui.modal = null; performStatus(item, item.status === 'completed' ? 'active' : 'completed'); }, { className: 'secondary-button' }), button(currentState().today.items[item.id] ? tr('removeFromToday') : tr('moveToToday'), () => { ui.modal = null; toggleToday(item); }, { className: 'secondary-button' }), button(tr('move'), () => { ui.modal = null; openMoveModal(item); }, { className: 'secondary-button' }), button(tr('duplicate'), () => { ui.modal = null; openDuplicateModal(item); }, { className: 'secondary-button' }), button(tr('exportTree'), () => { ui.modal = null; exportItemTree(item); }, { className: 'secondary-button' }), button(tr('delete'), () => { ui.modal = null; performDelete(item); }, { className: 'danger-button' })) };
-  scheduleRender();
-}
-
-function openChildCreate(parent) {
-  if (itemHasConflict(currentState(), parent.id)) { blockConflictedEdit(); return; }
-  openQuickCreate({ categoryId: parent.categoryId, parentId: parent.id });
-}
-
-function openRenameItem(item) { if (itemHasConflict(currentState(), item.id)) { blockConflictedEdit(); return; } openTextPrompt(tr('rename'), tr('itemTitle'), item.title, (value) => mutate('edit_title', (state) => renameItem(state, item.id, value), 'savedOffline')); }
 
 function exportItemTree(item) {
   const content = exportPTMD(currentState(), { scope: 'item', targetId: item.id });

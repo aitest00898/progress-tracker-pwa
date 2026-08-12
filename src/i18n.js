@@ -274,8 +274,8 @@ export const messages = {
     iconRing: '進度環：系統依子項目計算的衍生進度；100% 不會自動完成。',
     iconImportance: '星號：對父項目進度的相對權重，不是優先程度。',
     iconPriority: '彩色外框：使用者指定的優先程度；粗細與顏色共同提供線索。',
-    iconChevron: '右側箭頭：開啟項目詳情。',
-    iconDrag: '拖曳把手：長按後只可調整同層兄弟順序。',
+    iconChevron: '右側「…」開啟項目詳情；「+」新增子項目。',
+    iconDrag: '拖曳把手：觸碰即可調整同層兄弟順序。',
     iconMore: '更多：移動、副本、匯出與最近刪除。',
     iconReminder: '鈴鐺：提醒狀態；錯過提醒會集中在提醒中心。',
     iconSync: '同步警告：只代表該項目有衝突，不會搶用優先程度外框。',
@@ -340,7 +340,7 @@ export const messages = {
     focusCategoryRoot: '回到分類根目錄',
     swipeComplete: '左滑完成；已完成項目左滑可重做',
     swipeDelete: '右滑移至最近刪除',
-    longPressDrag: '長按把手排序',
+    longPressDrag: '觸碰把手即可拖曳排序',
     keyboardShortcuts: '桌面等效操作：按鈕、右鍵選單與鍵盤快捷鍵可完成相同功能。',
     pwaReady: '離線能力已就緒',
     capabilityNoPush: '此版本不啟用背景 Web Push。',
@@ -710,6 +710,10 @@ Object.assign(messages['zh-TW'], {
   calendarAlert30m: '30 分鐘前',
   calendarAlert1h: '1 小時前',
   calendarAlert1d: '1 天前',
+  tapToName: '點擊來命名',
+  addChildToItem: '為「{title}」新增子項目',
+  directDrag: '觸碰把手即可拖曳排序',
+  openDetail: '開啟項目詳情',
 });
 
 Object.assign(messages.en, {
@@ -746,6 +750,22 @@ Object.assign(messages.en, {
   calendarAlert30m: '30 minutes before',
   calendarAlert1h: '1 hour before',
   calendarAlert1d: '1 day before',
+  tapToName: 'Tap to name',
+  addChildToItem: 'Add a child item to “{title}”',
+  directDrag: 'Touch the handle to reorder',
+  openDetail: 'Open item details',
+});
+
+Object.assign(messages['zh-TW'], {
+  iconChevron: '右側「…」：開啟項目詳情；「+」：新增子項目。',
+  iconDrag: '拖曳把手：觸碰即可調整同層兄弟順序。',
+  longPressDrag: '觸碰把手即可拖曳排序',
+});
+
+Object.assign(messages.en, {
+  iconChevron: 'Right “…” opens item details; “+” creates a child item.',
+  iconDrag: 'Drag handle: touch it to reorder siblings.',
+  longPressDrag: 'Touch the handle to reorder',
 });
 
 export function getLocale(language) {

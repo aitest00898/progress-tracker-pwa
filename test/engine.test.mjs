@@ -37,6 +37,17 @@ test('quick create rejects an empty or whitespace-only title without adding an i
   assert.equal(s.items.length, 0);
 });
 
+test('inline child creation can persist an unnamed child without weakening normal title validation', () => {
+  const s = state();
+  const parent = add(s, 'Plan');
+  const unnamed = createItem(s, { categoryId: parent.categoryId, parentId: parent.id, title: '', allowUnnamed: true }, at);
+  assert.equal(unnamed.ok, true);
+  assert.equal(unnamed.item.title, '');
+  assert.equal(unnamed.item.parentId, parent.id);
+  assert.equal(s.items.filter((item) => item.parentId === parent.id).length, 1);
+  assert.equal(createItem(s, { categoryId: parent.categoryId, parentId: parent.id, title: '   ' }).ok, false);
+});
+
 test('moving a subtree preserves descendants and changes their category atomically', () => {
   const s = state();
   const target = createCategory(s, '旅行',  at).category;
