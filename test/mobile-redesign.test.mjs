@@ -10,6 +10,8 @@ test('approved mobile homepage is content-first and has accessible alternate sea
   assert.match(app, /function renderMobileSearchAffordance\(state\)/);
   assert.match(app, /openQuickCreate\(\{ categoryId: category\.id \}\)/);
   assert.doesNotMatch(app, /renderQuickCreate\(state, category\)/);
+  assert.match(app, /if \(!isMobileViewport\(\) \|\| recoveryMode\) shell\.append\(renderTopbar\(state\)\)/);
+  assert.match(app, /if \(!isMobileViewport\(\)\) page\.append\(header\)/);
   assert.match(app, /event\.key === '\/'/);
   assert.match(app, /if \(isMobileViewport\(\) && ui\.page === 'categories'\) openSearchDrawer\(\)/);
   assert.match(css, /--bottom-nav-height: 74px/);
@@ -45,4 +47,3 @@ test('calendar integration is a read-only export path with no fake synced state'
   assert.match(calendar, /navigatorObject\.share/);
   assert.match(calendar, /AbortError/);
 });
-

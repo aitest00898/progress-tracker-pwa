@@ -59,6 +59,7 @@ let modalReturnFocus = null;
 let modalFocusPending = false;
 let modalFocusTimer = null;
 let searchPullCleanup = null;
+let viewportResizeTimer = null;
 /** @type {Record<string, any>} */
 const ui = {
   page: 'categories', categoryId: null, smartView: 'today', settingsPage: 'general', detailId: null,
@@ -863,8 +864,8 @@ function render() {
 function renderShell(state) {
   const index = renderIndex(state);
   const shell = node('div', { class: 'app-shell' });
-  shell.append(renderTopbar(state));
   const recoveryMode = state.meta.recoveryMode;
+  if (!isMobileViewport() || recoveryMode) shell.append(renderTopbar(state));
   const body = node('div', { class: `app-body ${recoveryMode ? 'recovery-only' : ''}` });
   if (!recoveryMode) body.append(renderSidebar(state));
   const main = node('main', { class: 'main-content', id: 'main-content' });
@@ -966,7 +967,8 @@ function renderCategoryPage(state) {
   ui.categoryId = category.id;
   const page = node('section', { class: 'page category-page' });
   const header = node('div', { class: 'page-header' }, node('div', { class: 'page-header-main' }, renderCategoryBreadcrumb(state, category), heading(category.title, 1)), node('div', { class: 'page-header-actions' }, button(tr('addItem'), () => openQuickCreate({ categoryId: category.id }), { className: 'primary-button', icon: '+' }), iconButton('⌘', tr('keyboardShortcuts'), () => openInfoModal(tr('keyboardShortcuts')))));
-  page.append(header);
+  if (!isMobileViewport()) page.append(header);
+  else if (focusRootForCategory(state, category.id)) page.append(node('div', { class: 'mobile-focus-breadcrumb' }, renderCategoryBreadcrumb(state, category)));
   page.append(renderMobileSearchAffordance(state));
   if (ui.search.trim() || ui.searchFilter !== 'all') page.append(renderSearchResults(state));
   else page.append(renderTreeList(state, category));
@@ -1580,6 +1582,10 @@ export async function mountApp(repo) {
   globalThis.addEventListener('keydown', handleKeyboardShortcuts);
   globalThis.addEventListener('online', () => { scheduleRender(); scheduleCloudSync(250); });
   globalThis.addEventListener('offline', scheduleRender);
+  globalThis.addEventListener('resize', () => {
+    if (viewportResizeTimer !== null) clearTimeout(viewportResizeTimer);
+    viewportResizeTimer = setTimeout(() => { viewportResizeTimer = null; scheduleRender(); }, 120);
+  }, { passive: true });
   globalThis.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') scheduleCloudSync(250); });
   globalThis.matchMedia?.('(prefers-color-scheme: dark)').addEventListener?.('change', scheduleRender);
   globalThis.addEventListener('beforeunload', () => { repository.markNormalShutdown(); });
