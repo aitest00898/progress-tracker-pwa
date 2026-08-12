@@ -512,6 +512,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   --drag-insertion-color: color-mix(in srgb, var(--primary) 82%, var(--text));
   --drag-insertion-inset: 12px;
   --touch-target: 44px;
+  /* Progress rings and status circles are full-size controls. Keep their
+     grid column at the same width so their visual bounds never enter title. */
+  --row-state-column: var(--touch-target);
   --row-parent-end-width: 90px;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", "Noto Sans TC", sans-serif;
 }
@@ -2030,10 +2033,10 @@ select:focus-visible {
 .mobile-search-affordance:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
 @media (max-width: 700px) {
-  .item-row-main.parent { grid-template-columns: var(--touch-target) 38px minmax(0, 1fr) var(--row-parent-end-width); }
-  .item-row-main.leaf { grid-template-columns: var(--touch-target) 30px minmax(0, 1fr) calc(var(--touch-target) * 2 + 4px); }
-  .tree-child .item-row-main.parent { grid-template-columns: var(--touch-target) 36px minmax(0, 1fr) calc(var(--touch-target) * 2 + 4px); }
-  .tree-child .item-row-main.leaf { grid-template-columns: var(--touch-target) 30px minmax(0, 1fr) calc(var(--touch-target) * 2 + 4px); }
+  .item-row-main.parent { grid-template-columns: var(--touch-target) var(--row-state-column) minmax(0, 1fr) var(--row-parent-end-width); }
+  .item-row-main.leaf { grid-template-columns: var(--touch-target) var(--row-state-column) minmax(0, 1fr) calc(var(--touch-target) * 2 + 4px); }
+  .tree-child .item-row-main.parent { grid-template-columns: var(--touch-target) var(--row-state-column) minmax(0, 1fr) calc(var(--touch-target) * 2 + 4px); }
+  .tree-child .item-row-main.leaf { grid-template-columns: var(--touch-target) var(--row-state-column) minmax(0, 1fr) calc(var(--touch-target) * 2 + 4px); }
   .item-detail-trigger,
   .child-create-trigger { width: var(--touch-target); min-width: var(--touch-target); }
   .drag-handle, .tree-child .drag-handle { font-size: 27px; }

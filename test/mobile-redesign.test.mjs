@@ -33,11 +33,23 @@ test('approved mobile homepage is content-first and has accessible alternate sea
   assert.match(css, /\.mobile-search-drawer \{/);
   assert.match(css, /--mobile-search-collapsed-height: 36px/);
   assert.match(css, /--mobile-list-floating-clearance: calc\(var\(--bottom-nav-height\)/);
+  assert.match(css, /--row-state-column: var\(--touch-target\)/);
+  assert.match(css, /\.tree-child \.item-row-main\.leaf \{ grid-template-columns: var\(--touch-target\) var\(--row-state-column\) minmax\(0, 1fr\) calc\(var\(--touch-target\) \* 2 \+ 4px\); \}/);
   assert.match(css, /\.item-title-input \{/);
   assert.match(css, /\.child-create-trigger/);
   assert.match(css, /\.topbar \{ display: none; \}/);
   assert.match(css, /\.category-page \.page-header \{ display: none; \}/);
   assert.doesNotMatch(css, /body\s*\{[^}]*touch-action\s*:\s*none/);
+});
+
+test('child state control has a dedicated full hit-target column before title content', async () => {
+  const css = await readFile('src/styles.css', 'utf8');
+  const contract = css.slice(css.lastIndexOf('/* Final row interaction contract'));
+  assert.match(css, /--row-state-column: var\(--touch-target\)/);
+  assert.match(contract, /\.item-row-main\.parent \{ grid-template-columns: var\(--touch-target\) var\(--row-state-column\)/);
+  assert.match(contract, /\.item-row-main\.leaf \{ grid-template-columns: var\(--touch-target\) var\(--row-state-column\)/);
+  assert.match(contract, /\.tree-child \.item-row-main\.leaf \{ grid-template-columns: var\(--touch-target\) var\(--row-state-column\)/);
+  assert.doesNotMatch(contract, /\.tree-child \.item-row-main\.leaf \{ grid-template-columns: var\(--touch-target\) 30px/);
 });
 
 test('new calendar and search UI copy exists in both strict locales', () => {

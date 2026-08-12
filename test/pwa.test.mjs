@@ -72,7 +72,7 @@ test('document shell and responsive CSS preserve safe areas and reduced motion',
   assert.match(css, /padding: 2px 3px calc\(var\(--space-7\) \+ var\(--virtual-list-bottom-clearance\)\)/);
   assert.match(css, /scroll-padding-bottom: var\(--virtual-list-bottom-clearance\)/);
   assert.match(css, /--virtual-list-bottom-clearance: calc\(144px \+ var\(--safe-bottom\)\)/);
-  assert.match(css, /\.item-row-main\.leaf \{ grid-template-columns: var\(--touch-target\) 30px/);
+  assert.match(css, /\.item-row-main\.leaf \{ grid-template-columns: var\(--touch-target\) var\(--row-state-column\)/);
   assert.match(app, /function retainVirtualScroll\(state\)/);
   assert.match(app, /bottomGap: Math\.max\(0, viewport\.scrollHeight - viewport\.clientHeight - viewport\.scrollTop\)/);
   assert.match(app, /const nearBottom = retained\.atBottom \|\|/);
